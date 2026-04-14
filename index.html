@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>TradeDesk AI — Edge-Powered Trading Research</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=Syne:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    /* ── CSS Variables ─────────────────────────────────────── */
+    :root {
+      --bg-deep:     #080b0f;
+      --bg-panel:    #0d1117;
+      --bg-card:     #111820;
+      --bg-input:    #141c25;
+      --border:      #1e2d3d;
+      --border-glow: #2a4a6b;
+
+      --accent:      #00d4ff;
+      --accent-dim:  #0099bb;
+      --accent-glow: rgba(0, 212, 255, 0.12);
+      --green:       #00e676;
+      --green-dim:   rgba(0, 230, 118, 0.1);
+      --red:         #ff3d57;
+      --red-dim:     rgba(255, 61, 87, 0.1);
+      --amber:       #ffb300;
+      --amber-dim:   rgba(255, 179, 0, 0.1);
+
+      --text-primary:   #e8f1f8;
+      --text-secondary: #7a9bb5;
+      --text-muted:     #3d5a73;
+      --text-accent:    #00d4ff;
+
+      --font-display: 'Syne', sans-serif;
+      --font-mono:    'Space Mono', monospace;
+
+      --radius: 4px;
+      --transition: 150ms ease;
+    }
+
+    /* ── Reset ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; overflow: hidden; }
+
+    body {
+      background: var(--bg-deep);
+      color: var(--text-primary);
+      font-family: var(--font-mono);
+      font-size: 13px;
+      line-height: 1.6;
+    }
+
+    /* Scanline overlay */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0,0,0,0.04) 2px,
+        rgba(0,0,0,0.04) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── Layout ─────────────────────────────────────────────── */
+    .app {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      grid-template-rows: 48px 1fr;
+      height: 100vh;
+      gap: 0;
+    }
+
+    /* ── Topbar ─────────────────────────────────────────────── */
+    .topbar {
+      grid-column: 1 / -1;
+      background: var(--bg-panel);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 16px;
+      gap: 16px;
+      position: relative;
+    }
+
+    .topbar::after {
+      content: '';
+      position: absolute;
+      bottom: 0; left: 0; right: 0;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--accent), transparent);
+      opacity: 0.3;
+    }
+
+    .logo {
+      font-family: var(--font-display);
+      font-size: 15px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--text-primary);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .logo-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 8px var(--accent);
+      animation: pulse 2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; box-shadow: 0 0 8px var(--accent); }
+      50% { opacity: 0.6; box-shadow: 0 0 4px var(--accent); }
+    }
+
+    .topbar-center {
+      flex: 1;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .context-chip {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .context-chip .ticker-display {
+      color: var(--accent);
+      font-weight: 700;
+      letter-spacing: 0.05em;
+    }
+
+    .topbar-status {
+      font-size: 11px;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-left: auto;
+    }
+
+    .status-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      box-shadow: 0 0 6px var(--green);
+    }
+
+    /* ── Sidebar ─────────────────────────────────────────────── */
+    .sidebar {
+      background: var(--bg-panel);
+      border-right: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    .sidebar-section {
+      padding: 12px;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .sidebar-label {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-bottom: 8px;
+    }
+
+    /* Session setup */
+    .setup-field {
+      margin-bottom: 8px;
+    }
+
+    .setup-field label {
+      display: block;
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .setup-input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 6px 8px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: var(--text-primary);
+      outline: none;
+      transition: border-color var(--transition), box-shadow var(--transition);
+      text-transform: uppercase;
+    }
+
+    .setup-input:focus {
+      border-color: var(--accent-dim);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+
+    select.setup-input option {
+      background: var(--bg-card);
+    }
+
+    .btn-primary {
+      width: 100%;
+      padding: 7px;
+      background: transparent;
+      border: 1px solid var(--accent-dim);
+      border-radius: var(--radius);
+      color: var(--accent);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      cursor: pointer;
+      transition: all var(--transition);
+      text-transform: uppercase;
+    }
+
+    .btn-primary:hover {
+      background: var(--accent-glow);
+      border-color: var(--accent);
+      box-shadow: 0 0 12px var(--accent-glow);
+    }
+
+    /* History list */
+    .history-list {
+      flex: 1;
+      overflow-y: auto;
+      padding: 8px;
+    }
+
+    .history-list::-webkit-scrollbar { width: 4px; }
+    .history-list::-webkit-scrollbar-track { background: transparent; }
+    .history-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    .history-empty {
+      color: var(--text-muted);
+      font-size: 11px;
+      text-align: center;
+      padding: 16px 8px;
+    }
+
+    .ticker-group {
+      margin-bottom: 12px;
+    }
+
+    .ticker-group-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 4px 6px;
+      cursor: pointer;
+      border-radius: var(--radius);
+      transition: background var(--transition);
+    }
+
+    .ticker-group-header:hover { background: var(--bg-card); }
+
+    .ticker-name {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--accent);
+      letter-spacing: 0.05em;
+    }
+
+    .ticker-count {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    .ticker-analyses {
+      display: none;
+      padding-left: 8px;
+    }
+
+    .ticker-analyses.open { display: block; }
+
+    .analysis-item {
+      padding: 6px;
+      margin: 2px 0;
+      border-left: 2px solid var(--border);
+      cursor: pointer;
+      transition: all var(--transition);
+    }
+
+    .analysis-item:hover {
+      border-left-color: var(--accent);
+      background: var(--accent-glow);
+    }
+
+    .analysis-query {
+      font-size: 11px;
+      color: var(--text-secondary);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 200px;
+    }
+
+    .analysis-time {
+      font-size: 10px;
+      color: var(--text-muted);
+    }
+
+    /* ── Main Chat Area ───────────────────────────────────────── */
+    .main {
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      position: relative;
+    }
+
+    /* Grid background */
+    .main::before {
+      content: '';
+      position: absolute;
+      inset: 0;
+      background-image:
+        linear-gradient(var(--border) 1px, transparent 1px),
+        linear-gradient(90deg, var(--border) 1px, transparent 1px);
+      background-size: 40px 40px;
+      opacity: 0.2;
+      pointer-events: none;
+    }
+
+    /* ── Quick prompts ───────────────────────────────────────── */
+    .quick-bar {
+      padding: 8px 16px;
+      display: flex;
+      gap: 6px;
+      flex-wrap: wrap;
+      border-bottom: 1px solid var(--border);
+      background: rgba(13, 17, 23, 0.8);
+      backdrop-filter: blur(8px);
+      position: relative;
+      z-index: 1;
+    }
+
+    .quick-chip {
+      padding: 4px 10px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+      cursor: pointer;
+      transition: all var(--transition);
+      white-space: nowrap;
+    }
+
+    .quick-chip:hover {
+      border-color: var(--accent-dim);
+      color: var(--accent);
+      background: var(--accent-glow);
+    }
+
+    /* ── Messages ────────────────────────────────────────────── */
+    .messages {
+      flex: 1;
+      overflow-y: auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+      position: relative;
+      z-index: 1;
+    }
+
+    .messages::-webkit-scrollbar { width: 4px; }
+    .messages::-webkit-scrollbar-track { background: transparent; }
+    .messages::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+    /* Welcome state */
+    .welcome {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100%;
+      gap: 16px;
+      text-align: center;
+      opacity: 0;
+      animation: fadeIn 0.6s ease 0.2s forwards;
+    }
+
+    @keyframes fadeIn {
+      to { opacity: 1; }
+    }
+
+    .welcome-title {
+      font-family: var(--font-display);
+      font-size: 32px;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      background: linear-gradient(135deg, var(--text-primary), var(--accent));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .welcome-sub {
+      color: var(--text-muted);
+      font-size: 12px;
+      max-width: 360px;
+    }
+
+    .welcome-examples {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      max-width: 500px;
+      width: 100%;
+    }
+
+    .welcome-example {
+      padding: 10px 12px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      cursor: pointer;
+      transition: all var(--transition);
+      text-align: left;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--text-secondary);
+    }
+
+    .welcome-example:hover {
+      border-color: var(--accent-dim);
+      color: var(--text-primary);
+      background: var(--accent-glow);
+    }
+
+    /* Message bubbles */
+    .message {
+      display: flex;
+      gap: 10px;
+      animation: slideIn 0.2s ease;
+    }
+
+    @keyframes slideIn {
+      from { opacity: 0; transform: translateY(8px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .message.user { flex-direction: row-reverse; }
+
+    .msg-avatar {
+      width: 28px; height: 28px;
+      border-radius: var(--radius);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 10px;
+      font-weight: 700;
+      flex-shrink: 0;
+      letter-spacing: 0;
+    }
+
+    .message.user .msg-avatar {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+    }
+
+    .message.assistant .msg-avatar {
+      background: var(--accent-glow);
+      border: 1px solid var(--accent-dim);
+      color: var(--accent);
+    }
+
+    .msg-body { flex: 1; max-width: 85%; }
+    .message.user .msg-body { display: flex; flex-direction: column; align-items: flex-end; }
+
+    .msg-meta {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+    }
+
+    .msg-content {
+      padding: 10px 12px;
+      border-radius: var(--radius);
+      font-size: 12.5px;
+      line-height: 1.7;
+    }
+
+    .message.user .msg-content {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+    }
+
+    .message.assistant .msg-content {
+      background: var(--bg-panel);
+      border: 1px solid var(--border);
+      color: var(--text-primary);
+      border-left: 2px solid var(--accent-dim);
+    }
+
+    /* Markdown in assistant messages */
+    .msg-content h1, .msg-content h2, .msg-content h3 {
+      font-family: var(--font-display);
+      color: var(--accent);
+      margin: 12px 0 6px;
+      font-size: 13px;
+    }
+
+    .msg-content strong { color: var(--amber); }
+    .msg-content em { color: var(--text-secondary); }
+
+    .msg-content code {
+      background: var(--bg-deep);
+      border: 1px solid var(--border);
+      padding: 1px 5px;
+      border-radius: 3px;
+      font-size: 11px;
+      color: var(--green);
+    }
+
+    .msg-content pre {
+      background: var(--bg-deep);
+      border: 1px solid var(--border);
+      padding: 10px;
+      border-radius: var(--radius);
+      overflow-x: auto;
+      margin: 8px 0;
+    }
+
+    .msg-content ul, .msg-content ol {
+      padding-left: 16px;
+      margin: 6px 0;
+    }
+
+    .msg-content li { margin: 3px 0; }
+
+    .msg-content p { margin: 6px 0; }
+
+    /* Bias badges */
+    .bias-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 8px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .bias-tag.bullish { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+    .bias-tag.bearish { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
+    .bias-tag.neutral { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,179,0,0.3); }
+
+    /* Typing indicator */
+    .typing-indicator {
+      display: flex;
+      gap: 4px;
+      align-items: center;
+      padding: 10px 12px;
+    }
+
+    .typing-dot {
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      background: var(--accent);
+      opacity: 0.4;
+      animation: typingPulse 1.2s ease-in-out infinite;
+    }
+
+    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+    @keyframes typingPulse {
+      0%, 100% { opacity: 0.3; transform: scale(1); }
+      50% { opacity: 1; transform: scale(1.3); }
+    }
+
+    /* ── Voice button ─────────────────────────────────────────── */
+    .voice-btn {
+      width: 36px; height: 36px;
+      border-radius: var(--radius);
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-secondary);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all var(--transition);
+      flex-shrink: 0;
+    }
+
+    .voice-btn:hover {
+      border-color: var(--accent-dim);
+      color: var(--accent);
+      background: var(--accent-glow);
+    }
+
+    .voice-btn.recording {
+      border-color: var(--red);
+      color: var(--red);
+      background: var(--red-dim);
+      animation: recordPulse 1s ease-in-out infinite;
+    }
+
+    @keyframes recordPulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(255,61,87,0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(255,61,87,0); }
+    }
+
+    /* ── Input bar ────────────────────────────────────────────── */
+    .input-bar {
+      padding: 12px 16px;
+      background: rgba(13, 17, 23, 0.9);
+      border-top: 1px solid var(--border);
+      backdrop-filter: blur(8px);
+      position: relative;
+      z-index: 1;
+    }
+
+    .input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+
+    .input-wrap {
+      flex: 1;
+      position: relative;
+    }
+
+    .chat-input {
+      width: 100%;
+      background: var(--bg-input);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 9px 12px;
+      font-family: var(--font-mono);
+      font-size: 12.5px;
+      color: var(--text-primary);
+      outline: none;
+      resize: none;
+      min-height: 38px;
+      max-height: 120px;
+      line-height: 1.5;
+      transition: border-color var(--transition), box-shadow var(--transition);
+    }
+
+    .chat-input:focus {
+      border-color: var(--accent-dim);
+      box-shadow: 0 0 0 2px var(--accent-glow);
+    }
+
+    .chat-input::placeholder { color: var(--text-muted); }
+
+    .send-btn {
+      width: 36px; height: 36px;
+      background: var(--accent);
+      border: none;
+      border-radius: var(--radius);
+      color: var(--bg-deep);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: all var(--transition);
+      flex-shrink: 0;
+    }
+
+    .send-btn:hover { background: #33ddff; box-shadow: 0 0 12px rgba(0,212,255,0.4); }
+    .send-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    .input-hint {
+      font-size: 10px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+
+    /* ── Scrollbar voice transcript ────────────────────────────── */
+    .voice-transcript {
+      font-size: 11px;
+      color: var(--amber);
+      padding: 4px 0;
+      min-height: 16px;
+    }
+
+    /* ── Toast ───────────────────────────────────────────────── */
+    .toast {
+      position: fixed;
+      bottom: 80px;
+      right: 20px;
+      padding: 8px 14px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      font-size: 11px;
+      color: var(--text-secondary);
+      z-index: 1000;
+      opacity: 0;
+      transform: translateY(8px);
+      transition: all 0.2s ease;
+    }
+
+    .toast.show { opacity: 1; transform: translateY(0); }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <!-- Topbar -->
+    <header class="topbar">
+      <div class="logo">
+        <div class="logo-dot"></div>
+        TRADEDESK<span style="color:var(--accent)">_AI</span>
+      </div>
+      <div class="topbar-center">
+        <div class="context-chip" id="contextChip" style="display:none">
+          <span style="color:var(--text-muted)">SESSION:</span>
+          <span class="ticker-display" id="topTicker">—</span>
+          <span style="color:var(--border)">|</span>
+          <span id="topTimeframe" style="color:var(--text-secondary)">—</span>
+        </div>
+      </div>
+      <div class="topbar-status">
+        <div class="status-dot"></div>
+        WORKERS AI · LLAMA 3.3 · 70B
+      </div>
+    </header>
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="sidebar-section">
+        <div class="sidebar-label">Session Setup</div>
+        <div class="setup-field">
+          <label>Instrument</label>
+          <input class="setup-input" id="tickerInput" type="text" placeholder="GBP/USD" value="GBP/USD" />
+        </div>
+        <div class="setup-field">
+          <label>Timeframe</label>
+          <select class="setup-input" id="timeframeSelect">
+            <option value="1M">1M</option>
+            <option value="5M">5M</option>
+            <option value="15M">15M</option>
+            <option value="1H">1H</option>
+            <option value="4H" selected>4H</option>
+            <option value="D">Daily</option>
+            <option value="W">Weekly</option>
+          </select>
+        </div>
+        <button class="btn-primary" id="startSessionBtn">START SESSION →</button>
+      </div>
+
+      <div class="sidebar-section" style="padding-bottom:6px">
+        <div class="sidebar-label">Past Analyses</div>
+      </div>
+
+      <div class="history-list" id="historyList">
+        <div class="history-empty">No analyses yet.<br>Start a session to begin.</div>
+      </div>
+    </aside>
+
+    <!-- Main chat -->
+    <main class="main">
+      <!-- Quick prompts -->
+      <div class="quick-bar" id="quickBar">
+        <span class="quick-chip" onclick="quickPrompt('What is the current macro bias for this pair?')">Macro bias</span>
+        <span class="quick-chip" onclick="quickPrompt('Identify key support and resistance levels')">Key levels</span>
+        <span class="quick-chip" onclick="quickPrompt('Is there a high-probability setup forming right now?')">Setup scan</span>
+        <span class="quick-chip" onclick="quickPrompt('What risk events should I watch this week?')">Risk events</span>
+        <span class="quick-chip" onclick="quickPrompt('Analyze the trend structure on this timeframe')">Trend structure</span>
+        <span class="quick-chip" onclick="quickPrompt('What is the optimal position size for a 1% risk trade?')">Position sizing</span>
+      </div>
+
+      <!-- Messages -->
+      <div class="messages" id="messages">
+        <div class="welcome" id="welcome">
+          <div class="welcome-title">TradeDesk AI</div>
+          <div class="welcome-sub">Edge-powered trading research. Set your instrument and timeframe, then ask anything.</div>
+          <div class="welcome-examples">
+            <button class="welcome-example" onclick="quickPrompt('Analyze GBP/USD structure on the 4H — are we in a bullish or bearish phase?')">
+              "Analyze GBP/USD structure on the 4H — bullish or bearish phase?"
+            </button>
+            <button class="welcome-example" onclick="quickPrompt('What are the key POIs on Gold right now and where would you look to enter long?')">
+              "Key POIs on Gold and where to enter long?"
+            </button>
+            <button class="welcome-example" onclick="quickPrompt('Walk me through a moving average crossover setup for EUR/USD')">
+              "Walk me through a MA crossover setup for EUR/USD"
+            </button>
+            <button class="welcome-example" onclick="quickPrompt('What macro events this week could move the dollar significantly?')">
+              "What macro events could move the dollar this week?"
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Input bar -->
+      <div class="input-bar">
+        <div class="voice-transcript" id="voiceTranscript"></div>
+        <div class="input-row">
+          <button class="voice-btn" id="voiceBtn" title="Voice input">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2M12 19v4M8 23h8"/>
+            </svg>
+          </button>
+          <div class="input-wrap">
+            <textarea
+              class="chat-input"
+              id="chatInput"
+              placeholder="Ask about price action, macro setup, key levels..."
+              rows="1"
+            ></textarea>
+          </div>
+          <button class="send-btn" id="sendBtn">
+            <svg width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+              <line x1="22" y1="2" x2="11" y2="13"/>
+              <polygon points="22 2 15 22 11 13 2 9 22 2"/>
+            </svg>
+          </button>
+        </div>
+        <div class="input-hint">Enter to send · Shift+Enter for newline · Ctrl+K to clear</div>
+      </div>
+    </main>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script type="module">
+    import { marked } from 'https://cdn.jsdelivr.net/npm/marked@12/+esm';
+
+    // ── State ──────────────────────────────────────────────────
+    let sessionId = localStorage.getItem('tradedesk_session') || crypto.randomUUID();
+    let ticker = 'GBP/USD';
+    let timeframe = '4H';
+    let sessionActive = false;
+    let isStreaming = false;
+    let recognition = null;
+    let isRecording = false;
+
+    localStorage.setItem('tradedesk_session', sessionId);
+
+    const WORKER_URL = import.meta.env.VITE_WORKER_URL || '';
+
+    // ── DOM refs ───────────────────────────────────────────────
+    const messagesEl = document.getElementById('messages');
+    const welcomeEl = document.getElementById('welcome');
+    const chatInput = document.getElementById('chatInput');
+    const sendBtn = document.getElementById('sendBtn');
+    const voiceBtn = document.getElementById('voiceBtn');
+    const voiceTranscript = document.getElementById('voiceTranscript');
+    const tickerInput = document.getElementById('tickerInput');
+    const timeframeSelect = document.getElementById('timeframeSelect');
+    const startSessionBtn = document.getElementById('startSessionBtn');
+    const historyList = document.getElementById('historyList');
+    const contextChip = document.getElementById('contextChip');
+    const topTicker = document.getElementById('topTicker');
+    const topTimeframe = document.getElementById('topTimeframe');
+
+    // ── Session ────────────────────────────────────────────────
+    async function startSession() {
+      ticker = tickerInput.value.trim().toUpperCase() || 'GBP/USD';
+      timeframe = timeframeSelect.value;
+      tickerInput.value = ticker;
+
+      try {
+        const res = await fetch(`${WORKER_URL}/api/session/${sessionId}/init`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ticker, timeframe, sessionId }),
+        });
+
+        if (res.ok) {
+          sessionActive = true;
+          contextChip.style.display = 'flex';
+          topTicker.textContent = ticker;
+          topTimeframe.textContent = timeframe;
+          showToast(`Session started: ${ticker} ${timeframe}`);
+          loadHistory();
+          chatInput.placeholder = `Analyze ${ticker} on ${timeframe}...`;
+        }
+      } catch (e) {
+        showToast('Could not connect to worker — running in demo mode');
+        sessionActive = true;
+      }
+    }
+
+    // ── Chat ───────────────────────────────────────────────────
+    async function sendMessage(text) {
+      if (!text.trim() || isStreaming) return;
+
+      welcomeEl.style.display = 'none';
+      addMessage('user', text);
+      chatInput.value = '';
+      autoResize();
+
+      isStreaming = true;
+      sendBtn.disabled = true;
+
+      const assistantMsgEl = addMessage('assistant', '', true);
+      let fullText = '';
+
+      try {
+        const res = await fetch(`${WORKER_URL}/api/session/${sessionId}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: text }),
+        });
+
+        if (!res.ok || !res.body) throw new Error('Stream error');
+
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = decoder.decode(value);
+          const lines = chunk.split('\n');
+
+          for (const line of lines) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+              try {
+                const data = JSON.parse(line.slice(6));
+                if (data.response) {
+                  fullText += data.response;
+                  assistantMsgEl.innerHTML = marked.parse(fullText);
+                  messagesEl.scrollTop = messagesEl.scrollHeight;
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch (err) {
+        assistantMsgEl.innerHTML = '<span style="color:var(--red)">Connection error. Is the Worker running?</span>';
+      } finally {
+        isStreaming = false;
+        sendBtn.disabled = false;
+        messagesEl.scrollTop = messagesEl.scrollHeight;
+      }
+    }
+
+    function addMessage(role, content, streaming = false) {
+      const msg = document.createElement('div');
+      msg.className = `message ${role}`;
+
+      const avatar = document.createElement('div');
+      avatar.className = 'msg-avatar';
+      avatar.textContent = role === 'user' ? 'YOU' : 'AI';
+
+      const body = document.createElement('div');
+      body.className = 'msg-body';
+
+      const meta = document.createElement('div');
+      meta.className = 'msg-meta';
+      meta.textContent = role === 'user' ? 'You' : `TradeDesk AI · ${ticker || 'General'}`;
+
+      const contentEl = document.createElement('div');
+      contentEl.className = 'msg-content';
+
+      if (streaming) {
+        contentEl.innerHTML = `<div class="typing-indicator">
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+          <div class="typing-dot"></div>
+        </div>`;
+      } else {
+        contentEl.innerHTML = marked.parse(content);
+      }
+
+      body.appendChild(meta);
+      body.appendChild(contentEl);
+      msg.appendChild(avatar);
+      msg.appendChild(body);
+      messagesEl.appendChild(msg);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+
+      return contentEl;
+    }
+
+    // ── History ────────────────────────────────────────────────
+    async function loadHistory() {
+      try {
+        const tickersRes = await fetch(`${WORKER_URL}/api/tickers`);
+        const { results } = await tickersRes.json();
+
+        if (!results || results.length === 0) {
+          historyList.innerHTML = '<div class="history-empty">No analyses yet.</div>';
+          return;
+        }
+
+        historyList.innerHTML = '';
+        for (const row of results) {
+          const group = document.createElement('div');
+          group.className = 'ticker-group';
+
+          const header = document.createElement('div');
+          header.className = 'ticker-group-header';
+          header.innerHTML = `<span class="ticker-name">${row.ticker}</span><span class="ticker-count">${row.count} analyses</span>`;
+
+          const analyses = document.createElement('div');
+          analyses.className = 'ticker-analyses';
+
+          header.onclick = async () => {
+            const isOpen = analyses.classList.contains('open');
+            if (!isOpen && analyses.children.length === 0) {
+              const res = await fetch(`${WORKER_URL}/api/history/${encodeURIComponent(row.ticker)}`);
+              const { results: items } = await res.json();
+              analyses.innerHTML = '';
+              for (const item of items) {
+                const a = document.createElement('div');
+                a.className = 'analysis-item';
+                const d = new Date(item.created_at * 1000);
+                a.innerHTML = `<div class="analysis-query">${item.user_query}</div>
+                  <div class="analysis-time">${d.toLocaleDateString()} ${d.toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'})}</div>`;
+                a.onclick = (e) => {
+                  e.stopPropagation();
+                  welcomeEl.style.display = 'none';
+                  addMessage('user', item.user_query);
+                  const el = addMessage('assistant', '');
+                  el.innerHTML = marked.parse(item.ai_response);
+                };
+                analyses.appendChild(a);
+              }
+            }
+            analyses.classList.toggle('open');
+          };
+
+          group.appendChild(header);
+          group.appendChild(analyses);
+          historyList.appendChild(group);
+        }
+      } catch {}
+    }
+
+    // ── Voice input ────────────────────────────────────────────
+    function initVoice() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) {
+        voiceBtn.title = 'Voice not supported in this browser';
+        voiceBtn.style.opacity = '0.4';
+        return;
+      }
+
+      recognition = new SpeechRecognition();
+      recognition.continuous = false;
+      recognition.interimResults = true;
+      recognition.lang = 'en-US';
+
+      recognition.onresult = (e) => {
+        const transcript = Array.from(e.results)
+          .map(r => r[0].transcript)
+          .join('');
+        voiceTranscript.textContent = transcript;
+        if (e.results[e.results.length - 1].isFinal) {
+          chatInput.value = transcript;
+          voiceTranscript.textContent = '';
+          autoResize();
+        }
+      };
+
+      recognition.onend = () => {
+        isRecording = false;
+        voiceBtn.classList.remove('recording');
+      };
+    }
+
+    voiceBtn.addEventListener('click', () => {
+      if (!recognition) return;
+      if (isRecording) {
+        recognition.stop();
+      } else {
+        recognition.start();
+        isRecording = true;
+        voiceBtn.classList.add('recording');
+        voiceTranscript.textContent = 'Listening...';
+      }
+    });
+
+    // ── Textarea auto-resize ───────────────────────────────────
+    function autoResize() {
+      chatInput.style.height = 'auto';
+      chatInput.style.height = Math.min(chatInput.scrollHeight, 120) + 'px';
+    }
+
+    chatInput.addEventListener('input', autoResize);
+
+    chatInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        sendMessage(chatInput.value);
+      }
+    });
+
+    // Ctrl+K to clear
+    document.addEventListener('keydown', (e) => {
+      if (e.ctrlKey && e.key === 'k') {
+        e.preventDefault();
+        clearChat();
+      }
+    });
+
+    sendBtn.addEventListener('click', () => sendMessage(chatInput.value));
+    startSessionBtn.addEventListener('click', startSession);
+
+    // ── Quick prompts ──────────────────────────────────────────
+    window.quickPrompt = (text) => {
+      chatInput.value = text;
+      autoResize();
+      sendMessage(text);
+    };
+
+    // ── Clear chat ─────────────────────────────────────────────
+    async function clearChat() {
+      try {
+        await fetch(`${WORKER_URL}/api/session/${sessionId}/clear`, { method: 'DELETE' });
+      } catch {}
+      messagesEl.innerHTML = '';
+      messagesEl.appendChild(welcomeEl);
+      welcomeEl.style.display = 'flex';
+      showToast('Chat cleared');
+    }
+
+    // ── Toast ──────────────────────────────────────────────────
+    function showToast(msg) {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.classList.add('show');
+      setTimeout(() => toast.classList.remove('show'), 2500);
+    }
+
+    // ── Init ───────────────────────────────────────────────────
+    initVoice();
+    loadHistory();
+  </script>
+</body>
+</html>
