@@ -1,0 +1,19 @@
+name = "cf-ai-tradedesk"
+main = "src/index.ts"
+compatibility_date = "2024-11-06"
+
+[ai]
+binding = "AI"
+
+[[durable_objects.bindings]]
+name = "TRADE_SESSION"
+class_name = "TradeSession"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["TradeSession"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "tradedesk-db"
+database_id = "91783c8c-6107-4627-8dc3-75c0d1071c4c"
