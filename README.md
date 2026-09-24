@@ -1,157 +1,70 @@
-# cf_ai_tradedesk
+# TradeDesk
 
-> **AI-powered trading research assistant built entirely on Cloudflare's edge stack.**
+A chat assistant for trading research that runs entirely on Cloudflare: a Worker routes each chat session to its own Durable Object, Workers AI serves Llama 3.3 70B, replies stream to the browser as server-sent events, and every exchange is persisted to Durable Object storage and D1 without delaying the stream.
 
-A Bloomberg-terminal-inspired chat interface for real-time trading analysis — macro bias, key levels, setup identification, and risk management — powered by Llama 3.3 70B on Workers AI, with persistent memory via Durable Objects and D1.
+Built in April 2026 as the take-home for Cloudflare's software engineering internship. The brief asks for an LLM, a coordination layer, a chat input and persistent memory; `PROMPTS.md` lists the prompts used while building it, as the brief requires.
 
-**Live demo:** `https://cf-ai-tradedesk.pages.dev` *(deploy to get your URL)*
-
----
-
-## Architecture
+## Request path
 
 ```
-Browser (Pages)
-    │
-    ├── Chat UI (Vite + vanilla JS)
-    └── Voice input (Web Speech API)
-         │
-         ▼
-Cloudflare Worker (API router)
-    │
-    ├── /api/session/:id/*  ──→  Durable Object (TradeSession)
-    │                                  ├── Conversation history (DO Storage)
-    │                                  ├── Workers AI — Llama 3.3 70B streaming
-    │                                  └── RAG: past analyses injected into context
-    │
-    ├── /api/history/:ticker  ──→  D1 (past analyses)
-    └── /api/tickers          ──→  D1 (ticker summary)
+browser (Pages, single-file Vite app)
+  └─ POST /api/session/:id/chat ─► Worker ─► TradeSession Durable Object (one per session)
+                                                ├─ load last 20 messages from DO storage
+                                                ├─ SELECT 3 most recent analyses for the ticker from D1
+                                                ├─ Workers AI: llama-3.3-70b-instruct-fp8-fast, streaming
+                                                ├─ stream.tee(): one copy ─► SSE response to the browser
+                                                └─ other copy ─► waitUntil(): reassemble the reply,
+                                                                 append to DO storage, INSERT into D1
 ```
 
-### Components mapped to requirements
+Why a Durable Object per session: the platform guarantees a single instance per ID, so conversation state is single-threaded and strongly consistent with no locking in application code. Why `tee()` + `waitUntil()`: the browser gets the first token as soon as the model produces it, and persistence runs after the response has been returned.
 
-| Requirement | Implementation |
-|---|---|
-| **LLM** | `@cf/meta/llama-3.3-70b-instruct-fp8-fast` via Workers AI |
-| **Workflow / coordination** | Durable Objects (`TradeSession`) — one DO per session, manages context window and routing |
-| **User input** | Cloudflare Pages (chat UI) + Web Speech API (voice input) |
-| **Memory / state** | DO Storage (conversation history) + D1 SQLite (persistent analyses per ticker with RAG retrieval) |
+The "memory" is two things: the Durable Object keeps the last 20 messages of the session, and D1 stores every question/answer pair by ticker so a new session on the same instrument starts with the three most recent analyses prepended to the system prompt. That is a SQL query on recency, not vector search.
 
----
+## What's in the repo
 
-## Features
+```
+worker/src/index.ts       Worker router + TradeSession Durable Object (~270 lines)
+worker/wrangler.toml      bindings: AI, TRADE_SESSION (DO, SQLite-backed), DB (D1)
+migrations/0001_init.sql  sessions, analyses; indexes on ticker, session_id, created_at
+frontend/index.html       chat UI: streaming render (marked), voice input (Web Speech API),
+                          ticker/timeframe session context, quick-prompt chips, history sidebar, Ctrl+K clears
+PROMPTS.md                system prompt and the build prompts
+```
 
-- **Streaming responses** — Llama 3.3 streams tokens directly to the browser
-- **Session context** — Set your instrument (GBP/USD, XAU/USD, NQ, etc.) and timeframe; the AI tailors every response
-- **RAG memory** — Past analyses for a ticker are retrieved from D1 and injected into the AI context window
-- **Voice input** — Click the mic button and speak your query
-- **History sidebar** — Browse all saved analyses grouped by ticker
-- **Quick prompts** — One-click chips for common research queries
-- **Ctrl+K** to clear the chat
+## Routes
 
----
+| Method | Route | Handled by |
+| --- | --- | --- |
+| POST | `/api/session/:id/init` | DO — set ticker and timeframe for the session |
+| POST | `/api/session/:id/chat` | DO — stream a reply (SSE), persist it in the background |
+| GET | `/api/session/:id/state` | DO — current session and message history |
+| DELETE | `/api/session/:id/clear` | DO — reset the session |
+| GET | `/api/history/:ticker` | Worker — saved analyses for a ticker (D1) |
+| GET | `/api/tickers` | Worker — tickers with analysis counts (D1) |
 
-## Getting Started
+## Run it
 
-### Prerequisites
-
-- Node.js 18+
-- Cloudflare account (free tier works)
-- `wrangler` CLI: `npm install -g wrangler`
-
-### 1. Clone and install
+Requires Node 18+, a Cloudflare account and `wrangler` (`npm i -g wrangler`).
 
 ```bash
-git clone https://github.com/yourusername/cf_ai_tradedesk
-cd cf_ai_tradedesk
-```
-
-### 2. Deploy the Worker
-
-```bash
-cd worker
-npm install
-
-# Create D1 database
-wrangler d1 create tradedesk-db
-
-# Copy the database_id output into wrangler.toml → d1_databases[0].database_id
-
-# Run migrations
+# worker
+cd worker && npm install
+wrangler d1 create tradedesk-db            # put the returned database_id in wrangler.toml
 wrangler d1 execute tradedesk-db --file=../migrations/0001_init.sql
+wrangler deploy                            # note the workers.dev URL
 
-# Deploy
-wrangler deploy
+# frontend
+cd ../frontend && npm install
+echo "VITE_WORKER_URL=https://<your-worker>.workers.dev" > .env
+npm run build && wrangler pages deploy dist --project-name cf-ai-tradedesk
 ```
 
-Note the deployed Worker URL (e.g. `https://cf-ai-tradedesk.your-subdomain.workers.dev`).
+Local development: `wrangler dev` in `worker/` and `npm run dev` in `frontend/` (the Vite dev server proxies `/api` to `localhost:8787`).
 
-### 3. Deploy the Frontend
+## Limits
 
-```bash
-cd ../frontend
-npm install
-
-# Set your worker URL
-echo "VITE_WORKER_URL=https://cf-ai-tradedesk.your-subdomain.workers.dev" > .env
-
-# Build
-npm run build
-
-# Deploy to Pages
-wrangler pages deploy dist --project-name cf-ai-tradedesk
-```
-
-### Local development
-
-```bash
-# Terminal 1 — run worker
-cd worker && wrangler dev
-
-# Terminal 2 — run frontend (proxies /api to localhost:8787)
-cd frontend && npm run dev
-```
-
----
-
-## Project Structure
-
-```
-cf_ai_tradedesk/
-├── worker/
-│   ├── src/
-│   │   └── index.ts          # Worker entry + TradeSession Durable Object
-│   ├── wrangler.toml
-│   ├── package.json
-│   └── tsconfig.json
-├── frontend/
-│   ├── index.html            # Full chat UI (single file)
-│   ├── vite.config.js
-│   └── package.json
-├── migrations/
-│   └── 0001_init.sql         # D1 schema
-├── README.md
-└── PROMPTS.md
-```
-
----
-
-## How the AI works
-
-1. **System prompt** establishes TradeDesk AI as an expert in TA, macro, and risk management
-2. **Session context** injects the current ticker and timeframe into every request
-3. **RAG layer** queries D1 for the 3 most recent analyses on the active ticker and prepends them to the system prompt — the model references past analysis without re-asking
-4. **Durable Object** keeps the last 20 messages in memory for conversational continuity
-5. **D1** durably stores every Q&A pair, enabling cross-session recall and the history sidebar
-
----
-
-## Built with
-
-- [Cloudflare Workers](https://workers.cloudflare.com/) — serverless edge compute
-- [Durable Objects](https://developers.cloudflare.com/durable-objects/) — stateful coordination
-- [Workers AI](https://developers.cloudflare.com/workers-ai/) — Llama 3.3 70B inference
-- [D1](https://developers.cloudflare.com/d1/) — edge SQLite database
-- [Cloudflare Pages](https://pages.cloudflare.com/) — frontend hosting
-- [Vite](https://vitejs.dev/) — frontend build
-- [marked](https://marked.js.org/) — markdown rendering
+- No authentication; session IDs are generated client-side, and anyone with an ID can read that session.
+- The model gets no market data. It reasons from the prompt and prior analyses only, so treat output as a writing aid, not a signal.
+- One D1 migration; the schema has not needed a second.
+- No tests yet.
