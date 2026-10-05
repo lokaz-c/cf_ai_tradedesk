@@ -7,7 +7,7 @@
     "postinstall": "npm --prefix worker install && npm --prefix frontend install",
     "dev": "concurrently --names worker,frontend --kill-others-on-fail \"npm --prefix worker run dev\" \"npm --prefix frontend run dev\"",
     "dev:no-ai": "concurrently --names worker,frontend --kill-others-on-fail \"npm --prefix worker run dev:no-ai\" \"npm --prefix frontend run dev\"",
-    "test": "npm --prefix worker test",
+    "test": "npm --prefix worker test && npm --prefix frontend test",
     "typecheck": "npm --prefix worker run typecheck"
   },
   "devDependencies": {
