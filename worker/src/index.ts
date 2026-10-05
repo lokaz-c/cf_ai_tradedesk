@@ -3,7 +3,7 @@
  * Worker entry point + TradeSession Durable Object
  */
 
-import { collectStreamedText } from "./sse";
+import { collectStreamedText } from "../../shared/sse";
 
 export interface Env {
   AI: Ai;
