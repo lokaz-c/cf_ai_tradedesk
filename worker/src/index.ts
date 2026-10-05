@@ -3,6 +3,8 @@
  * Worker entry point + TradeSession Durable Object
  */
 
+import { collectStreamedText } from "./sse";
+
 export interface Env {
   AI: Ai;
   DB: D1Database;
@@ -156,22 +158,7 @@ export class TradeSession {
 
       // Background: collect response and save to D1
       this.state.waitUntil((async () => {
-        const reader = stream2.getReader();
-        const decoder = new TextDecoder();
-        let fullResponse = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = decoder.decode(value);
-          const lines = chunk.split("\n").filter(l => l.startsWith("data: ") && l !== "data: [DONE]");
-          for (const line of lines) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              fullResponse += data.response ?? "";
-            } catch {}
-          }
-        }
+        const fullResponse = await collectStreamedText(stream2);
 
         // Update session messages
         session.messages.push({ role: "user", content: body.message });

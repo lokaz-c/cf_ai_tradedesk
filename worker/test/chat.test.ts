@@ -136,6 +136,27 @@ describe("POST /api/session/:id/chat", () => {
       ]);
     });
   });
+  // Network reads do not line up with SSE events: one read can end in the
+  // middle of a line or in the middle of a multi-byte UTF-8 character.
+  it.each([1, 2, 7, 64])(
+    "reassembles the reply when the stream arrives in %i-byte chunks",
+    async (chunkSize) => {
+      const tokens = ["Gold ", "holds 2,350 \u2014 ", "watch \u20ac/\u00a5 ", "crosses ", "\u2713"];
+      const id = `chunked-${chunkSize}`;
+      await initSession(id, "XAU/USD", "1H");
+      mockAiStream(tokens, chunkSize);
+      const { body } = await chat(id, "q");
+
+      expect(body).toBe(sseBody(tokens));
+      expect((await getState(id)).messages[1]).toEqual({
+        role: "assistant",
+        content: tokens.join(""),
+      });
+      await vi.waitFor(async () => {
+        expect((await analysesFor(id)).map((r) => r.ai_response)).toEqual([tokens.join("")]);
+      });
+    },
+  );
 });
 
 describe("DELETE /api/session/:id/clear", () => {
