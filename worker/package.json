@@ -9,7 +9,8 @@
     "db:migrate": "wrangler d1 migrations apply tradedesk-db --local",
     "deploy": "wrangler deploy",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test"
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test",
+    "db:explain": "node scripts/explain-query-plan.mjs"
   },
   "devDependencies": {
     "@cloudflare/vitest-plugin": "^1.3.6",

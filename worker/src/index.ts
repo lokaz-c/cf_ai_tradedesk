@@ -5,6 +5,7 @@
 
 import { collectStreamedText } from "../../shared/sse";
 import { badRequest, notFound, readJsonObject } from "./http";
+import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "./queries";
 import { isSessionId, parseChatBody, parseInitBody, parseTickerPath } from "./validation";
 
 export interface Env {
@@ -119,10 +120,7 @@ export class TradeSession {
       // Fetch relevant past analyses from D1 for RAG
       let ragContext = "";
       if (session.ticker) {
-        const pastAnalyses = await this.env.DB.prepare(
-          `SELECT user_query, ai_response, created_at FROM analyses
-           WHERE ticker = ? ORDER BY created_at DESC LIMIT 3`
-        ).bind(session.ticker).all<{ user_query: string; ai_response: string; created_at: number }>();
+        const pastAnalyses = await this.env.DB.prepare(CONTEXT_SQL).bind(session.ticker).all<{ user_query: string; ai_response: string; created_at: number }>();
 
         if (pastAnalyses.results.length > 0) {
           ragContext = "\n\n[PAST ANALYSES FOR " + session.ticker + "]\n" +
@@ -255,20 +253,14 @@ async function route(request: Request, env: Env): Promise<Response> {
         "Invalid ticker: use 1-10 letters or digits, optionally followed by '/', '.' or '-' and 1-10 more (for example GBP/USD or NQ).",
       );
     }
-    const results = await env.DB.prepare(
-      `SELECT id, session_id, ticker, timeframe, user_query, ai_response, created_at
-       FROM analyses WHERE ticker = ? ORDER BY created_at DESC LIMIT 20`
-    ).bind(ticker).all();
+    const results = await env.DB.prepare(HISTORY_SQL).bind(ticker).all();
 
     return Response.json(results);
   }
 
   // Route: GET /api/tickers — get all tickers with saved analyses
   if (url.pathname === "/api/tickers" && request.method === "GET") {
-    const results = await env.DB.prepare(
-      `SELECT ticker, COUNT(*) as count, MAX(created_at) as last_analysis
-       FROM analyses GROUP BY ticker ORDER BY last_analysis DESC`
-    ).all();
+    const results = await env.DB.prepare(TICKERS_SQL).all();
     return Response.json(results);
   }
 

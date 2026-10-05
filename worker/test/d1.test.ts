@@ -1,5 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
+import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "../src/queries";
 import { api, clearD1, expectProblem, initSession, insertAnalyses, type AnalysisFixture } from "./helpers";
 
 interface HistoryRow {
@@ -14,7 +15,7 @@ interface HistoryRow {
 
 beforeEach(clearD1);
 
-describe("schema from migrations/0001_init.sql", () => {
+describe("schema from migrations/", () => {
   it("creates the sessions and analyses tables", async () => {
     const { results } = await env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name IN ('sessions', 'analyses') ORDER BY name",
@@ -22,14 +23,42 @@ describe("schema from migrations/0001_init.sql", () => {
     expect(results.map((r) => r.name)).toEqual(["analyses", "sessions"]);
   });
 
-  it("indexes analyses on ticker, session and recency", async () => {
+  it("indexes analyses on (ticker, created_at) and on session", async () => {
     const { results } = await env.DB.prepare(
       "SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'analyses' AND sql IS NOT NULL ORDER BY name",
     ).all<{ name: string; sql: string }>();
     expect(results.map((r) => [r.name, r.sql.replace(/\s+/g, " ")])).toEqual([
-      ["idx_analyses_created", "CREATE INDEX idx_analyses_created ON analyses(created_at DESC)"],
       ["idx_analyses_session", "CREATE INDEX idx_analyses_session ON analyses(session_id)"],
-      ["idx_analyses_ticker", "CREATE INDEX idx_analyses_ticker ON analyses(ticker)"],
+      [
+        "idx_analyses_ticker_created",
+        "CREATE INDEX idx_analyses_ticker_created ON analyses(ticker, created_at)",
+      ],
+    ]);
+  });
+});
+
+describe("query plans", () => {
+  async function plan(sql: string): Promise<string[]> {
+    const { results } = await env.DB.prepare(`EXPLAIN QUERY PLAN ${sql}`)
+      .bind(...(sql.includes("?") ? ["NQ"] : []))
+      .all<{ detail: string }>();
+    return results.map((r) => r.detail);
+  }
+
+  it.each([
+    ["history", HISTORY_SQL],
+    ["context", CONTEXT_SQL],
+  ])("the %s query reads idx_analyses_ticker_created in order, with no sort", async (_name, sql) => {
+    expect(await plan(sql)).toEqual([
+      "SEARCH analyses USING INDEX idx_analyses_ticker_created (ticker=?)",
+    ]);
+  });
+
+  it("the ticker rollup scans the composite index without touching the table", async () => {
+    // The remaining sort is over one row per ticker (ORDER BY an aggregate).
+    expect(await plan(TICKERS_SQL)).toEqual([
+      "SCAN analyses USING COVERING INDEX idx_analyses_ticker_created",
+      "USE TEMP B-TREE FOR ORDER BY",
     ]);
   });
 });
