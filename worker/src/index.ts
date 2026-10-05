@@ -244,10 +244,16 @@ export default {
       return stub.fetch(doRequest);
     }
 
-    // Route: GET /api/history/:ticker — fetch past analyses for a ticker
-    const historyMatch = url.pathname.match(/^\/api\/history\/([A-Z/]+)$/);
+    // Route: GET /api/history/:ticker — fetch past analyses for a ticker.
+    // The front end URL-encodes the ticker, so "GBP/USD" arrives as "GBP%2FUSD".
+    const historyMatch = url.pathname.match(/^\/api\/history\/(.+)$/);
     if (historyMatch && request.method === "GET") {
-      const ticker = historyMatch[1].toUpperCase();
+      let ticker: string;
+      try {
+        ticker = decodeURIComponent(historyMatch[1]).toUpperCase();
+      } catch {
+        return Response.json({ error: "Invalid ticker" }, { status: 400, headers: corsHeaders });
+      }
       const results = await env.DB.prepare(
         `SELECT id, session_id, ticker, timeframe, user_query, ai_response, created_at
          FROM analyses WHERE ticker = ? ORDER BY created_at DESC LIMIT 20`

@@ -78,6 +78,32 @@ describe("GET /api/history/:ticker", () => {
       created_at: 2500,
     });
   });
+
+  // The front end requests encodeURIComponent(ticker), and its default
+  // instrument is GBP/USD, so the slash arrives as %2F.
+  it.each([
+    ["/api/history/GBP%2FUSD", "GBP/USD"],
+    ["/api/history/GBP/USD", "GBP/USD"],
+    ["/api/history/gbp%2Fusd", "GBP/USD"],
+    ["/api/history/nq", "NQ"],
+    ["/api/history/US30", "US30"],
+  ])("GET %s returns the analyses saved under %s", async (path, ticker) => {
+    await insertAnalyses([
+      { id: "t1", ticker, userQuery: "q", aiResponse: "a", createdAt: 1 },
+      { id: "other", ticker: "OTHER", userQuery: "q", aiResponse: "a", createdAt: 2 },
+    ]);
+    const res = await api(path);
+    expect(res.status).toBe(200);
+    const { results } = await res.json<{ results: HistoryRow[] }>();
+    expect(results.map((r) => [r.id, r.ticker])).toEqual([["t1", ticker]]);
+  });
+
+  it("rejects a malformed percent-encoding with 400", async () => {
+    const res = await api("/api/history/%E0%A4%A");
+    expect(res.status).toBe(400);
+    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(await res.json()).toEqual({ error: "Invalid ticker" });
+  });
 });
 
 describe("GET /api/tickers", () => {
