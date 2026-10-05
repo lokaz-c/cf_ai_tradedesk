@@ -17,3 +17,5 @@ new_sqlite_classes = ["TradeSession"]
 binding = "DB"
 database_name = "tradedesk-db"
 database_id = "91783c8c-6107-4627-8dc3-75c0d1071c4c"
+# Schema migrations live at the repo root, shared with the tests.
+migrations_dir = "../migrations"
