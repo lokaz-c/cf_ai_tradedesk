@@ -16,6 +16,19 @@ export interface SessionState {
   createdAt: number;
 }
 
+/**
+ * Asserts an RFC 9457 problem details response with the given status, and
+ * returns its body.
+ */
+export async function expectProblem(res: Response, status: number, title: string) {
+  expect(res.status).toBe(status);
+  expect(res.headers.get("content-type")).toBe("application/problem+json");
+  const body = await res.json<{ type: string; title: string; status: number; detail: string }>();
+  expect(body).toMatchObject({ type: "about:blank", title, status });
+  expect(typeof body.detail).toBe("string");
+  return body;
+}
+
 /** Sends a request through the Worker's default export (the real router). */
 export function api(path: string, init?: RequestInit): Promise<Response> {
   return exports.default.fetch(new Request(`https://tradedesk.test${path}`, init));

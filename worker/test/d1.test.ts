@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { api, clearD1, initSession, insertAnalyses, type AnalysisFixture } from "./helpers";
+import { api, clearD1, expectProblem, initSession, insertAnalyses, type AnalysisFixture } from "./helpers";
 
 interface HistoryRow {
   id: string;
@@ -100,9 +100,9 @@ describe("GET /api/history/:ticker", () => {
 
   it("rejects a malformed percent-encoding with 400", async () => {
     const res = await api("/api/history/%E0%A4%A");
-    expect(res.status).toBe(400);
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
-    expect(await res.json()).toEqual({ error: "Invalid ticker" });
+    const body = await expectProblem(res, 400, "Bad Request");
+    expect(body.detail).toMatch(/^Invalid ticker/);
   });
 });
 
