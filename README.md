@@ -45,7 +45,7 @@ cd worker && npm run db:migrate && npx wrangler d1 execute tradedesk-db --local 
 
 ## Run it locally
 
-Requires Node 22.22 or later, or Node 24.15 or later (jsdom 30, used by the front-end tests, needs one of these); CI uses Node 24 LTS.
+Requires Node 22 (22.22 or later) or Node 24 (24.15 or later), the versions jsdom 30 supports; the front-end tests use it. CI uses Node 24 LTS.
 
 ```bash
 git clone https://github.com/lokaz-c/cf_ai_tradedesk.git
