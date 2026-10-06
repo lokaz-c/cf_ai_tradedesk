@@ -5,7 +5,7 @@
  * and the facts the post-check compares the answer against.
  */
 
-import type { Fact } from "./grounding";
+import { UNIT_AFTER, type Fact, type Unverified } from "./grounding";
 import { clientKey, consumeDailyBacktest, intVar } from "./limits";
 import {
   parseBacktestArgs,
@@ -14,6 +14,7 @@ import {
   RISK_PROFILES,
   type BacktestMetrics,
   type BacktestRun,
+  type MetricKey,
   type QuantConfig,
 } from "./quant";
 import type { ToolCall, ToolOutcome, ToolSchema } from "./tools";
@@ -40,7 +41,8 @@ export const BACKTEST_TOOL: ToolSchema = {
   name: "run_backtest",
   description:
     "Runs a backtest of one strategy on one symbol with the quant backtester and returns its metrics " +
-    "(total return, CAGR, max drawdown, volatility, Sharpe ratio, win rate, trades, final equity). " +
+    "(total return, CAGR, max drawdown, volatility, Sharpe ratio, win rate, trades, final equity); " +
+    "a metric quant cannot compute for the run comes back as n/a with the reason. " +
     "quant's data is a synthetic dataset; symbol names are labels only. Call it at most once per question.",
   parameters: {
     type: "object",
@@ -78,6 +80,11 @@ export const METRICS: { key: keyof BacktestMetrics; label: string; unit: "percen
 
 const UNIT_TEXT = { percent: "percent", currency: "currency", ratio: "", count: "" } as const;
 
+/** quant's reason for a null metric, as shown to the model and on the page. */
+export function undefinedReason(run: BacktestRun, key: MetricKey): string {
+  return run.undefinedMetrics[key] ?? "quant gave no reason";
+}
+
 export function backtestBlock(run: BacktestRun): string {
   const data = run.synthetic
     ? `Data: SYNTHETIC. quant's dataset ${run.dataFile}: ${run.dataDescription} These are not real prices; say so.`
@@ -85,15 +92,20 @@ export function backtestBlock(run: BacktestRun): string {
   const lines = METRICS.map(({ key, label, unit, note }) => {
     const value = run.metrics[key];
     const units = [UNIT_TEXT[unit], note].filter(Boolean).join(", ");
-    const shown = value === null ? "not a finite number in quant's response" : String(value);
+    const shown = value === null ? `n/a (${undefinedReason(run, key)}); quant has no value for it` : String(value);
     return `${key} (${label}${units ? `, ${units}` : ""}): ${shown}`;
   });
+  const hasUndefined = METRICS.some(({ key }) => run.metrics[key] === null);
   return [
     `[BACKTEST run_backtest ${run.symbol}] quant run ${run.backtestId ?? "(no id)"}: ${run.strategy} on ${run.symbol}, ` +
       `${run.startDate} to ${run.endDate}, risk profile ${run.riskProfile}, initial capital ${run.initialCapital}.`,
+    ...(run.periodNote ? [run.periodNote] : []),
     data,
     "Metrics exactly as quant returned them:",
     ...lines,
+    ...(hasUndefined
+      ? ["A metric shown as n/a has no value for this run: write n/a with its reason in brackets, never a number."]
+      : []),
     "Report only these numbers.",
   ].join("\n");
 }
@@ -108,6 +120,59 @@ export function backtestFacts(run: BacktestRun): Fact[] {
     facts.push({ ...base, value, label, unit: unit === "percent" ? "percent" : "value", signless });
   }
   return facts;
+}
+
+/** How an answer may name each metric, for nullMetricClaims. */
+const METRIC_NAMES: Record<MetricKey, string> = {
+  total_return: "total return",
+  cagr: "cagr|compound annual growth rate|annuali[sz]ed return",
+  max_drawdown: "max(?:imum)? drawdown|drawdown",
+  volatility: "volatility",
+  sharpe_ratio: "sharpe(?: ratio)?",
+  win_rate: "win rate|hit rate",
+  avg_win: "average win|avg\\.? win",
+  avg_loss: "average loss|avg\\.? loss",
+  num_trades: "number of trades|trade count",
+  final_equity: "final equity",
+  profit_factor: "profit factor",
+  max_consecutive_wins: "consecutive wins",
+  max_consecutive_losses: "consecutive losses",
+};
+
+/** Words between a metric's name and a number that mean the answer said it has no value. */
+const NO_VALUE = /n\/a|not (?:defined|available|applicable)|undefined|no value|none/i;
+
+/**
+ * Numbers an answer gives for a metric quant reported as null: the metric's
+ * name, then a number in the same clause (no full stop, comma or semicolon
+ * between them, and no "n/a"). The general post-check flags most of these as
+ * unverified anyway; this one also catches small whole numbers and numbers
+ * that happen to match another value, and says which metric they were given for.
+ */
+export function nullMetricClaims(reply: string, runs: readonly BacktestRun[]): Unverified[] {
+  const claims: Unverified[] = [];
+  const seen = new Set<string>();
+  for (const run of runs) {
+    for (const { key, label } of METRICS) {
+      if (run.metrics[key] !== null) continue;
+      const re = new RegExp(
+        `\\b(?:${METRIC_NAMES[key]})\\b([^.;,\\n\\d]{0,30}?)(\\d{1,3}(?:,\\d{3})+(?:\\.\\d+)?|\\d+(?:\\.\\d+)?)(\\s?%)?`,
+        "gi",
+      );
+      for (const m of reply.matchAll(re)) {
+        const [whole, gap, digits, percent] = m;
+        if (NO_VALUE.test(gap) || UNIT_AFTER.test(reply.slice(m.index + whole.length))) continue;
+        const negative = /(?:[-\u2212]\$?|\$[-\u2212])$/.test(gap);
+        const value = (negative ? -1 : 1) * Number(digits.replaceAll(",", ""));
+        const text = `${negative ? "-" : ""}${digits}${percent ? "%" : ""}`;
+        const claim = `${text} given for ${label}, which quant reports as n/a (${undefinedReason(run, key)})`;
+        if (seen.has(claim)) continue;
+        seen.add(claim);
+        claims.push({ text: claim, value });
+      }
+    }
+  }
+  return claims;
 }
 
 function failure(call: ToolCall, symbol: string, status: string, detail: string): ToolOutcome {

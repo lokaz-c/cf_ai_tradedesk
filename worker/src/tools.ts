@@ -14,7 +14,14 @@
  * are never streamed.
  */
 
-import { backtestExecutor, backtestNote, BACKTEST_TOOL, type BacktestEnv, type BacktestVars } from "./backtest";
+import {
+  backtestExecutor,
+  backtestNote,
+  BACKTEST_TOOL,
+  nullMetricClaims,
+  type BacktestEnv,
+  type BacktestVars,
+} from "./backtest";
 import { checkAnswer, type Citation, type Fact, type Unverified } from "./grounding";
 import { intVar } from "./limits";
 import {
@@ -271,7 +278,7 @@ const FAILURE_ADVICE: Record<FailureKind, string> = {
   not_displayable: 'NO DATA. Say "no data" for its levels.',
   timeout: "UNAVAILABLE. Say that market data is unavailable right now; do not state levels.",
   unavailable: "UNAVAILABLE. Say that market data is unavailable right now; do not state levels.",
-  rate_limited: "UNAVAILABLE. Say that market data is unavailable right now; do not state levels.",
+  rate_limited: "BUSY. Say that market data is busy right now and repeat the retry advice in the reason; do not state levels.",
   bad_response: "UNAVAILABLE. Say that market data is unavailable right now; do not state levels.",
 };
 
@@ -318,15 +325,15 @@ export async function runMarketDataTool(cfg: MarketDataConfig, call: ToolCall): 
       },
     };
   }
-  // get_recent_bars
+  // get_recent_bars: market-data returns exactly the latest `days` bars (`last`).
   const days = daysArg(call.arguments.days);
-  const res = await getBars(cfg, call.arguments.ticker);
+  const res = await getBars(cfg, call.arguments.ticker, days);
   if (!res.ok) return failureOutcome(call, ticker, res.kind, res.detail);
   const page = res.value;
   if (page.bars.length === 0) {
     return failureOutcome(call, page.ticker, "not_found", `market-data has no bars for ${page.ticker}.`);
   }
-  const bars = page.bars.slice(-days);
+  const bars = page.bars;
   return {
     call,
     text: barsBlock(page.ticker, page.source, bars),
@@ -502,14 +509,18 @@ export function groundAnswer(
   question: string,
 ): { notes: string; meta: GroundingMeta } {
   const facts = outcomes.flatMap((o) => o.facts);
-  const { citations, unverified } = checkAnswer(reply, facts, question);
+  const backtests = outcomes.flatMap((o) => (o.backtest ? [o.backtest] : []));
+  const { citations, unverified: plain } = checkAnswer(reply, facts, question);
+  // A number given for a metric quant reported as n/a replaces its plain entry, so it is listed once, with the metric.
+  const claims = nullMetricClaims(reply, backtests);
+  const unverified = [...plain.filter((u) => !claims.some((c) => c.value === u.value)), ...claims];
   return {
     notes: formatNotes(dataNotes(outcomes, unverified.map((u) => u.text))),
     meta: {
       data: outcomes.map((o) => o.status),
       citations,
       unverified,
-      backtests: outcomes.flatMap((o) => (o.backtest ? [o.backtest] : [])),
+      backtests,
     },
   };
 }

@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { hang, json, mockFetch, networkError, problemResponse } from "./fetch-mock";
-import { barsFor, LEVELS_ROUTE, levelsFor, MARKET_DATA_URL, marketDataRoutes } from "./fixtures";
+import { barsFor, LEVELS_ROUTE, levelsFor, MARKET_DATA_URL, marketDataRateLimited, marketDataRoutes } from "./fixtures";
 import {
   aiInputs,
   api,
@@ -137,7 +137,7 @@ describe("tool rounds", () => {
 
   it("serves recent bars, and cites the latest close", async () => {
     await groundedSession("g-bars");
-    mockFetch(marketDataRoutes());
+    const { requests } = mockFetch(marketDataRoutes());
     const fixture = barsFor("S001").bars;
     const last = fixture.at(-1)!;
     const ai = mockAiTools(
@@ -147,6 +147,8 @@ describe("tool rounds", () => {
 
     const { body } = await chat("g-bars", "How did S001 close?");
 
+    // market-data returns exactly the latest 5 bars (`last`), not a year to trim.
+    expect(requests.map((r) => r.url)).toEqual([`${MARKET_DATA_URL}/v1/bars/S001?last=5`]);
     const system = aiInputs(ai, 2).messages[0].content;
     expect(system).toContain("[MARKET DATA get_recent_bars S001, last 5 sessions] source: synthetic");
     for (const bar of fixture.slice(-5)) expect(system).toContain(`${bar.date} ${bar.open} ${bar.high}`);
@@ -278,6 +280,21 @@ describe("when market-data fails", () => {
     expect(meta.data).toEqual([{ tool: "get_levels", service: "market-data", ticker: "S999", status, detail }]);
     expect(meta.citations).toEqual([]);
     expect(replyText(body)).toContain(`- No market data for S999: ${detail}`);
+  });
+
+  it("is busy when market-data rate-limits the Worker, and passes on its wait", async () => {
+    await groundedSession("g-busy", "S001");
+    mockFetch({ [LEVELS_ROUTE]: () => marketDataRateLimited(12) });
+    const ai = mockAiTools([toolCalls(["get_levels", { ticker: "S001" }])], ["Market data is busy; try again in 12 seconds."]);
+    const { body } = await chat("g-busy", "Levels?");
+    const detail = "market-data is busy (rate limit reached); retry in 12 s.";
+    expect(aiInputs(ai, 1).messages.at(-1)!.content).toBe(
+      `[MARKET DATA get_levels S001] BUSY. Say that market data is busy right now and repeat the retry advice in the reason; do not state levels. Reason: ${detail}`,
+    );
+    expect(metaOf(body).data).toEqual([
+      { tool: "get_levels", service: "market-data", ticker: "S001", status: "rate_limited", detail },
+    ]);
+    expect(replyText(body)).toContain(`- No market data for S001: ${detail}`);
   });
 
   it("does not call market-data for a ticker it cannot serve", async () => {

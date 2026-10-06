@@ -5,28 +5,40 @@
  * - GET /v1/levels/{ticker}: `{ ticker, source, asOf, close, pivots: { basedOn,
  *   p, r1, r2, r3, s1, s2, s3 }, range20d: { high, low }, range50d, range52w }`.
  *   Range values are null until the symbol has that much history.
- * - GET /v1/bars/{ticker}?limit=: `{ ticker, source, adjustment, from, to,
- *   bars: [{ date, open, high, low, close, volume }], nextAfter }`, oldest
- *   first. Without dates the window is the year before the latest bar.
- * - GET /v1/symbols?limit=: `{ symbols: [{ ticker, name, source, firstBar,
- *   lastBar, lastClose }] }`.
+ * - GET /v1/bars/{ticker}?last=N (1 to 1,000): `{ ticker, source, adjustment,
+ *   from, to, bars: [{ date, open, high, low, close, volume, feed? }],
+ *   nextAfter: null }`, the N latest split-adjusted bars, oldest first, in one
+ *   page. `feed` ("iex" or "sip") is present only on Alpaca bars.
+ * - GET /v1/symbols?limit=&after=: `{ symbols: [{ ticker, name, source,
+ *   firstBar, lastBar, lastClose, feed, lastIngestedAt }], nextAfter }`, at
+ *   most 200 per page, keyset-paginated by ticker: pass `nextAfter` back as
+ *   `after`; it is null on the last page.
  * - Errors are RFC 9457 problem details; 404 covers both "unknown ticker" and
- *   "not visible without a key". Anonymous requests are rate-limited per IP
- *   (429); an `X-API-Key` header lifts the limit and unlocks every source.
+ *   "not visible to this caller". Requests without a key that has the
+ *   `rate-limit` scope are rate-limited per IP: a 429 carries `Retry-After`
+ *   and `RateLimit: "per-ip";r=0;t=<seconds>`. A wrong key is a 401.
+ *
+ * `MARKET_DATA_API_KEY` is sent as `X-API-Key` when set. It is meant to be a
+ * key with only the `rate-limit` scope: that lifts the per-IP limit and
+ * leaves market-data serving only its public (synthetic) sources.
  *
  * `source` is "synthetic" or "alpaca". Alpaca's terms forbid public display of
  * its data without written consent, so market-data serves only synthetic data
- * without a key, and this client refuses any source not listed in
- * MARKET_DATA_DISPLAY_SOURCES (default: synthetic), even when a key would let
- * the Worker read it.
+ * without the `alpaca-data` scope, and this client refuses any source not
+ * listed in MARKET_DATA_DISPLAY_SOURCES (default: synthetic), even when a key
+ * would let the Worker read it.
  */
 
 import { intVar } from "./limits";
+import { retryAfterFrom, retryPhrase } from "./retry";
 
 export interface MarketDataVars {
   /** Base URL of the market-data service, e.g. https://market-data.example.com. Unset turns grounding off. */
   MARKET_DATA_URL?: unknown;
-  /** Optional API key, sent as X-API-Key. A secret: `wrangler secret put MARKET_DATA_API_KEY`. */
+  /**
+   * Optional API key, sent as X-API-Key: one with only the `rate-limit` scope.
+   * A secret: `wrangler secret put MARKET_DATA_API_KEY`.
+   */
   MARKET_DATA_API_KEY?: unknown;
   /** Comma-separated `source` values TradeDesk may show (default "synthetic"). */
   MARKET_DATA_DISPLAY_SOURCES?: unknown;
@@ -125,6 +137,10 @@ export interface SymbolSummary {
   name: string | null;
   source: string;
   lastBar: string | null;
+  /** Alpaca feed of the latest bar ("iex" or "sip"); null for synthetic data. */
+  feed: string | null;
+  /** When market-data last ingested the symbol (ISO 8601); null for synthetic data. */
+  lastIngestedAt: string | null;
 }
 
 export type FailureKind =
@@ -139,7 +155,13 @@ export type FailureKind =
 
 export type Result<T> =
   | { ok: true; value: T }
-  | { ok: false; kind: FailureKind; detail: string };
+  | {
+      ok: false;
+      kind: FailureKind;
+      detail: string;
+      /** For rate_limited: the seconds market-data asked us to wait, when it said. */
+      retryAfter?: number;
+    };
 
 const fail = (kind: FailureKind, detail: string) => ({ ok: false, kind, detail }) as const;
 
@@ -195,10 +217,15 @@ async function getJson(cfg: MarketDataConfig, path: string, what: string): Promi
         return fail("not_found", detail ?? `market-data has no data for ${what}.`);
       case 400:
         return fail("rejected", detail ?? `market-data rejected the request for ${what}.`);
-      case 429:
-        return fail("rate_limited", "market-data is rate-limiting this Worker; try again in a minute.");
+      case 429: {
+        const wait = retryAfterFrom(res.headers);
+        return {
+          ...fail("rate_limited", `market-data is busy (rate limit reached); ${retryPhrase(wait)}.`),
+          ...(wait !== null ? { retryAfter: wait } : {}),
+        };
+      }
       case 401:
-        return fail("unavailable", "market-data rejected the configured API key.");
+        return fail("unavailable", "market-data rejected the configured API key (MARKET_DATA_API_KEY).");
       default:
         return fail("unavailable", `market-data returned HTTP ${res.status}.`);
     }
@@ -271,7 +298,7 @@ function parseBar(v: unknown): Bar | null {
   return { date: v.date, open, high, low, close, volume };
 }
 
-export function parseBarsPage(body: unknown): (BarsPage & { nextAfter: string | null }) | null {
+export function parseBarsPage(body: unknown): BarsPage | null {
   if (!isObject(body) || !Array.isArray(body.bars)) return null;
   const { ticker, source, adjustment, from, to } = body;
   if (typeof ticker !== "string" || typeof source !== "string") return null;
@@ -284,7 +311,6 @@ export function parseBarsPage(body: unknown): (BarsPage & { nextAfter: string | 
     from: typeof from === "string" ? from : "",
     to: typeof to === "string" ? to : "",
     bars: bars as Bar[],
-    nextAfter: typeof body.nextAfter === "string" ? body.nextAfter : null,
   };
 }
 
@@ -299,53 +325,67 @@ export async function getLevels(cfg: MarketDataConfig, rawTicker: unknown): Prom
   return displayable(cfg, levels);
 }
 
-/** The most bars one page may hold (market-data's MAX_PAGE). */
-const PAGE_LIMIT = 1000;
-/** A year of daily bars fits in one page; this only guards against a runaway loop. */
-const MAX_PAGES = 3;
+/** The most bars market-data returns for `last` (its MAX_PAGE). */
+export const MAX_LAST_BARS = 1000;
 
 /**
- * GET /v1/bars/{ticker} with no dates: split-adjusted daily bars for the year
- * before the latest bar, oldest first. Follows `nextAfter` if a page is full.
+ * GET /v1/bars/{ticker}?last=N: the N latest split-adjusted daily bars,
+ * oldest first, in one request. N is clamped to 1-1,000.
  */
-export async function getBars(cfg: MarketDataConfig, rawTicker: unknown): Promise<Result<BarsPage>> {
+export async function getBars(cfg: MarketDataConfig, rawTicker: unknown, last: number): Promise<Result<BarsPage>> {
   const ticker = marketDataTicker(rawTicker);
   if (!ticker.ok) return ticker;
-  const base = `/v1/bars/${encodeURIComponent(ticker.value)}?limit=${PAGE_LIMIT}`;
-  let page: (BarsPage & { nextAfter: string | null }) | null = null;
-  const bars: Bar[] = [];
-  let after: string | null = null;
-  for (let i = 0; i < MAX_PAGES; i++) {
-    const res = await getJson(cfg, after ? `${base}&after=${after}` : base, ticker.value);
-    if (!res.ok) return res;
-    const parsed = parseBarsPage(res.value);
-    if (!parsed) return fail("bad_response", "market-data returned bars in an unexpected shape.");
-    page ??= parsed;
-    bars.push(...parsed.bars);
-    after = parsed.nextAfter;
-    if (!after || !/^\d{4}-\d{2}-\d{2}$/.test(after)) break;
-  }
-  const { nextAfter: _ignored, ...first } = page!;
-  return displayable(cfg, { ...first, bars });
+  const n = Math.min(MAX_LAST_BARS, Math.max(1, Math.trunc(last) || 1));
+  const res = await getJson(cfg, `/v1/bars/${encodeURIComponent(ticker.value)}?last=${n}`, ticker.value);
+  if (!res.ok) return res;
+  const page = parseBarsPage(res.value);
+  if (!page) return fail("bad_response", "market-data returned bars in an unexpected shape.");
+  // market-data sends at most N; keep the newest N if a server ever sends more.
+  return displayable(cfg, { ...page, bars: page.bars.slice(-n) });
 }
 
-/** GET /v1/symbols: the symbols with data, limited to the sources this deployment may show. */
-export async function getSymbols(cfg: MarketDataConfig, limit = 50): Promise<Result<SymbolSummary[]>> {
-  const res = await getJson(cfg, `/v1/symbols?limit=${limit}`, "the symbol list");
-  if (!res.ok) return res;
-  if (!isObject(res.value) || !Array.isArray(res.value.symbols)) {
-    return fail("bad_response", "market-data returned the symbol list in an unexpected shape.");
-  }
+/** Rows per /v1/symbols page (market-data's MAX_SYMBOLS_PAGE). */
+const SYMBOLS_PAGE = 200;
+/** Pages followed before stopping: 1,000 symbols, more than the demo's 50. Guards against a cursor loop. */
+const MAX_SYMBOL_PAGES = 5;
+
+function parseSymbol(cfg: MarketDataConfig, s: unknown): SymbolSummary | null {
+  if (!isObject(s) || typeof s.ticker !== "string" || typeof s.source !== "string") return null;
+  if (!MARKET_DATA_TICKER.test(s.ticker) || !cfg.displaySources.has(s.source.toLowerCase())) return null;
+  return {
+    ticker: s.ticker,
+    name: typeof s.name === "string" ? s.name.slice(0, 80) : null,
+    source: s.source,
+    lastBar: typeof s.lastBar === "string" ? s.lastBar : null,
+    feed: typeof s.feed === "string" ? s.feed.slice(0, 10) : null,
+    lastIngestedAt: typeof s.lastIngestedAt === "string" ? s.lastIngestedAt.slice(0, 40) : null,
+  };
+}
+
+/**
+ * GET /v1/symbols, following `nextAfter` page by page: the symbols with data,
+ * limited to the sources this deployment may show, in ticker order.
+ */
+export async function getSymbols(cfg: MarketDataConfig): Promise<Result<SymbolSummary[]>> {
   const symbols: SymbolSummary[] = [];
-  for (const s of res.value.symbols) {
-    if (!isObject(s) || typeof s.ticker !== "string" || typeof s.source !== "string") continue;
-    if (!MARKET_DATA_TICKER.test(s.ticker) || !cfg.displaySources.has(s.source.toLowerCase())) continue;
-    symbols.push({
-      ticker: s.ticker,
-      name: typeof s.name === "string" ? s.name.slice(0, 80) : null,
-      source: s.source,
-      lastBar: typeof s.lastBar === "string" ? s.lastBar : null,
-    });
+  const cursors = new Set<string>();
+  let after: string | null = null;
+  for (let page = 0; page < MAX_SYMBOL_PAGES; page++) {
+    const path = `/v1/symbols?limit=${SYMBOLS_PAGE}${after ? `&after=${encodeURIComponent(after)}` : ""}`;
+    const res = await getJson(cfg, path, "the symbol list");
+    if (!res.ok) return res;
+    if (!isObject(res.value) || !Array.isArray(res.value.symbols)) {
+      return fail("bad_response", "market-data returned the symbol list in an unexpected shape.");
+    }
+    for (const s of res.value.symbols) {
+      const parsed = parseSymbol(cfg, s);
+      if (parsed) symbols.push(parsed);
+    }
+    const next: unknown = res.value.nextAfter;
+    // A missing, malformed or repeated cursor ends the listing.
+    if (typeof next !== "string" || !MARKET_DATA_TICKER.test(next) || cursors.has(next)) break;
+    cursors.add(next);
+    after = next;
   }
   return { ok: true, value: symbols };
 }

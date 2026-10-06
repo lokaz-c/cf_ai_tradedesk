@@ -4,7 +4,7 @@
  * server, CORS stays the Worker's allow-list, and the display-source check
  * applies to the chart as it does to the model.
  *
- *   GET /api/market/bars/:ticker   daily bars for the year before the latest bar
+ *   GET /api/market/bars/:ticker   the latest CHART_BARS daily bars (about a year)
  *   GET /api/market/symbols        symbols with data the deployment may show
  */
 
@@ -12,6 +12,7 @@ import { problem } from "./http";
 import { clientKey } from "./limits";
 import {
   getBars,
+  type Result,
   getSymbols,
   isSynthetic,
   readMarketDataConfig,
@@ -29,6 +30,8 @@ export interface MarketRouteEnv extends MarketDataVars {
 /** market-data answers change once a day; it caches them for five minutes too. */
 const CACHE_CONTROL = "public, max-age=300";
 const RETRY_AFTER_SECONDS = 60;
+/** Bars for the chart: about one year of trading sessions, fetched with market-data's `last`. */
+export const CHART_BARS = 252;
 
 const STATUS_FOR: Record<FailureKind, number> = {
   unsupported_ticker: 404,
@@ -48,9 +51,15 @@ const TITLES: Record<number, string> = {
   504: "Gateway Timeout",
 };
 
-function failure(kind: FailureKind, detail: string): Response {
-  const status = STATUS_FOR[kind];
-  return problem(status, TITLES[status], detail);
+/**
+ * A failed market-data call as a problem response. When market-data rate-limits
+ * the Worker, its wait is passed on as Retry-After, so the page can say when
+ * to retry.
+ */
+function failure(res: Extract<Result<unknown>, { ok: false }>): Response {
+  const status = STATUS_FOR[res.kind];
+  const headers = res.retryAfter !== undefined ? { "Retry-After": String(res.retryAfter) } : undefined;
+  return problem(status, TITLES[status], res.detail, headers);
 }
 
 /** Handles /api/market/* GET routes; returns null for any other path. */
@@ -75,14 +84,14 @@ export async function marketRoute(request: Request, env: MarketRouteEnv, url: UR
 
   if (isSymbols) {
     const res = await getSymbols(cfg);
-    if (!res.ok) return failure(res.kind, res.detail);
+    if (!res.ok) return failure(res);
     return Response.json({ symbols: res.value }, { headers: { "Cache-Control": CACHE_CONTROL } });
   }
 
   const ticker = parseTickerPath(barsMatch![1]);
   if (!ticker) return problem(400, "Bad Request", INVALID_TICKER);
-  const res = await getBars(cfg, ticker);
-  if (!res.ok) return failure(res.kind, res.detail);
+  const res = await getBars(cfg, ticker, CHART_BARS);
+  if (!res.ok) return failure(res);
   const page = res.value;
   return Response.json(
     {

@@ -11,11 +11,23 @@ import {
   setMarkdown,
   showError,
 } from './render.js';
+import {
+  buildSymbolChips,
+  buildSymbolOptions,
+  defaultTicker,
+  fetchSymbols,
+  FALLBACK_TICKER,
+  suggestTicker,
+} from './symbols.js';
 
 // ── State ──────────────────────────────────────────────────
 let sessionId = localStorage.getItem('tradedesk_session') || crypto.randomUUID();
-let ticker = 'GBP/USD';
+let ticker = FALLBACK_TICKER;
 let timeframe = '4H';
+// A new session starts on market-data's first symbol once the list arrives (see symbols.js).
+let sessionDefault = FALLBACK_TICKER;
+let tickerEdited = false;
+let sessionStarted = false;
 let isStreaming = false;
 let recognition = null;
 let isRecording = false;
@@ -53,7 +65,7 @@ const scrollToEnd = () => {
 
 // ── Session ────────────────────────────────────────────────
 async function startSession() {
-  ticker = tickerInput.value.trim().toUpperCase() || 'GBP/USD';
+  ticker = tickerInput.value.trim().toUpperCase() || sessionDefault;
   timeframe = timeframeSelect.value;
   tickerInput.value = ticker;
 
@@ -73,6 +85,7 @@ async function startSession() {
     showToast(await errorMessage(res));
     return;
   }
+  sessionStarted = true;
   contextChip.style.display = 'flex';
   topTicker.textContent = ticker;
   topTimeframe.textContent = timeframe;
@@ -169,7 +182,7 @@ function showChartSource(data) {
   chartSource.title = String(data.sourceLabel ?? '');
 }
 
-/** Loads a year of daily bars for `symbol`. Resolves true when the chart shows it. */
+/** Loads the latest daily bars for `symbol` (about a year). Resolves true when the chart shows it. */
 async function loadChart(symbol) {
   const request = ++chartRequest;
   chartTicker.textContent = symbol;
@@ -215,42 +228,31 @@ async function showCitationsOnChart(report) {
   showLegend(chart().showCitations(parsed.citations));
 }
 
-/** Lists market-data's symbols (synthetic S001... on the public demo) as one-click sessions. */
+/**
+ * Lists market-data's symbols (synthetic S001... on the public demo) as
+ * one-click sessions and in the instrument input's suggestions, and makes the
+ * first one the default for a new session. GBP/USD stays available; it just
+ * has no market data.
+ */
 async function loadSymbols() {
-  let res;
-  try {
-    res = await fetch(`${WORKER_URL}/api/market/symbols`);
-  } catch {
+  const result = await fetchSymbols(WORKER_URL);
+  if (result.error) {
+    // 503: market data is not connected, or market-data asked the Worker to wait.
+    if (result.status === 503 && !sessionStarted) chartStatus.textContent = result.error;
     return;
   }
-  if (!res.ok) {
-    if (res.status === 503) chartStatus.textContent = await errorMessage(res);
-    return;
-  }
-  let symbols;
-  try {
-    ({ symbols } = await res.json());
-  } catch {
-    return;
-  }
-  if (!Array.isArray(symbols) || symbols.length === 0) return;
-  symbolChips.replaceChildren();
-  symbolList.replaceChildren();
-  for (const s of symbols) {
-    const chip = document.createElement('button');
-    chip.className = 'symbol-chip';
-    chip.type = 'button';
-    chip.textContent = String(s.ticker);
-    chip.title = `${s.name ?? s.ticker} (${s.source})`;
-    chip.onclick = () => {
-      tickerInput.value = String(s.ticker);
+  const { symbols } = result;
+  if (symbols.length === 0) return;
+  sessionDefault = defaultTicker(symbols);
+  suggestTicker(tickerInput, symbols, { edited: tickerEdited, started: sessionStarted });
+  symbolChips.replaceChildren(
+    ...buildSymbolChips(document, symbols, (picked) => {
+      tickerInput.value = picked;
+      tickerEdited = true;
       startSession();
-    };
-    symbolChips.append(chip);
-    const option = document.createElement('option');
-    option.value = String(s.ticker);
-    symbolList.append(option);
-  }
+    }),
+  );
+  symbolList.replaceChildren(...buildSymbolOptions(document, symbols));
   symbolSection.hidden = false;
 }
 
@@ -370,6 +372,9 @@ function autoResize() {
 }
 
 chatInput.addEventListener('input', autoResize);
+tickerInput.addEventListener('input', () => {
+  tickerEdited = true;
+});
 
 chatInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {

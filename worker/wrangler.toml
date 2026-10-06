@@ -44,7 +44,9 @@ RATE_LIMIT_PERIOD_SECONDS = 60
 # supplies every price level. Empty turns grounding off: the model is told it
 # has no price data. Set it to the service's base URL, e.g.
 # MARKET_DATA_URL = "https://market-data.example.com". An optional API key is
-# a secret, never a var: `npx wrangler secret put MARKET_DATA_API_KEY`.
+# a secret, never a var: `npx wrangler secret put MARKET_DATA_API_KEY`. Give
+# TradeDesk a key with only the `rate-limit` scope: it lifts market-data's
+# per-IP limit and still sees only synthetic data.
 MARKET_DATA_URL = ""
 # The market-data `source` values TradeDesk may show, comma-separated.
 # Alpaca's terms forbid public display of its data without written consent,
@@ -57,11 +59,16 @@ MAX_TOOL_ROUNDS = 2
 
 # Backtest tool: the quant backtester (github.com/lokaz-c/quant). Empty turns
 # the tool off. Set it to the API's base URL, e.g.
-# QUANT_API_URL = "https://quant.example.com".
+# QUANT_API_URL = "https://quant.example.com". An optional API key, whose
+# SHA-256 digest is in quant's QUANT_API_KEY_SHA256, lifts quant's per-address
+# rate limits: `npx wrangler secret put QUANT_API_KEY`.
 QUANT_API_URL = ""
-# How long to wait for quant to finish a backtest, in milliseconds. quant
-# runs the backtest inside the request, so this covers the whole run.
-QUANT_TIMEOUT_MS = 20000
+# How long to wait for quant to finish a backtest, in milliseconds (100 to
+# 120000). quant runs the backtest inside the request, so this covers the
+# whole run. quant's `make deploy-check` ran its default request (5 symbols,
+# one year, with a baseline) in 52.7 s at Render's free size, and quant stops
+# a run itself at 90 s (504).
+QUANT_TIMEOUT_MS = 60000
 # Backtests accepted per UTC day across all users (counted in D1).
 # 0 turns the backtest tool off.
 DAILY_BACKTEST_BUDGET = 20
