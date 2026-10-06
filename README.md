@@ -17,7 +17,7 @@ flowchart LR
     B["Browser<br>Vite app"] -->|"POST /api/session/:id/chat"| W["Worker<br>router"]
     B -->|"GET /api/history/:ticker<br>GET /api/tickers"| W
     B -->|"chart: GET /api/market/bars/:ticker<br>GET /api/market/symbols"| W
-    W -->|"GET /v1/bars, /v1/symbols"| MD
+    W -->|"GET /v1/bars, /v1/symbols"| MD["market-data<br>Spring Boot + PostgreSQL<br>(separate repo)"]
     W -->|"idFromName(id)"| DO["TradeSession<br>Durable Object<br>one per session"]
     W -->|"history and rollup queries"| D1[("D1")]
     W -.->|"per-IP limit"| RL["Rate Limiting<br>binding"]
@@ -25,7 +25,7 @@ flowchart LR
     DO -->|"3 latest analyses for the ticker<br>daily budget"| D1
     DO -->|"1. tool rounds (not streamed)"| AI["Workers AI<br>Llama 3.3 70B"]
     AI -->|"tool_calls"| DO
-    DO -->|"get_levels, get_recent_bars<br>GET /v1/levels, /v1/bars"| MD["market-data<br>Spring Boot + PostgreSQL<br>(separate repo)"]
+    DO -->|"get_levels, get_recent_bars<br>GET /v1/levels, /v1/bars"| MD
     DO -->|"run_backtest<br>POST /api/backtest/"| Q["quant<br>Flask backtester<br>(separate repo)"]
     DO -.->|"per-IP backtest limit"| RL
     DO -->|"2. answer from the data block<br>stream: true"| AI
