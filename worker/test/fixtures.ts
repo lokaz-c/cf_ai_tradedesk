@@ -118,14 +118,16 @@ export function marketDataRoutes(
   };
 }
 
-// quant (lokaz-c/quant, app/routes/backtest_routes.py and
-// app/services/backtest_service.py). Hand-made metric values.
+// quant (lokaz-c/quant, app/routes and docs/api.md as of its public-deploy
+// hardening). Hand-made metric values.
 
 export const QUANT_URL = "https://quant.test";
 export const BACKTEST_ROUTE = `POST ${QUANT_URL}/api/backtest/`;
 export const QUANT_DATA_ROUTE = `GET ${QUANT_URL}/api/data`;
 
 export const QUANT_DATA_SOURCE = {
+  source: "synthetic",
+  reported_source: "synthetic",
   synthetic: true,
   file: "data/sample_data.csv",
   description:
@@ -153,6 +155,7 @@ export function backtestResponse(overrides: Record<string, unknown> = {}) {
     backtest_id: 42,
     status: "completed",
     metrics: QUANT_METRICS,
+    undefined_metrics: {},
     summary: { equity: 96788.3, cash: 96788.3, positions: 0, total_return: -0.032117 },
     data: QUANT_DATA_SOURCE,
     baseline: null,
@@ -160,10 +163,44 @@ export function backtestResponse(overrides: Record<string, unknown> = {}) {
   };
 }
 
+/** One winning trade: quant sends avg_loss and profit_factor as null, with the reasons. */
+export function oneWinnerResponse() {
+  return backtestResponse({
+    metrics: { ...QUANT_METRICS, win_rate: 100, avg_loss: null, num_trades: 1, profit_factor: null },
+    undefined_metrics: { avg_loss: "no losing trades", profit_factor: "no losing trades" },
+  });
+}
+
+export const QUANT_LIMITS = { max_symbols: 10, max_range_days: 1827, timeout_seconds: 90.0 };
+
 export const QUANT_DATA_INFO = {
   ...QUANT_DATA_SOURCE,
   symbols: ["AAPL", "MSFT", "NVDA"],
   start_date: "2020-01-01",
   end_date: "2024-12-31",
   bars: 1305,
+  available_sources: ["synthetic"],
+  default_source: "synthetic",
+  limits: QUANT_LIMITS,
 };
+
+/** An RFC 9457 problem from quant (app/routes/errors.py), which keeps the `error` field. */
+export function quantProblem(status: number, detail: string, headers: Record<string, string> = {}): Response {
+  const title = { 400: "Bad Request", 401: "Unauthorized", 429: "Too Many Requests", 503: "Service Unavailable", 504: "Gateway Timeout" }[
+    status
+  ];
+  return new Response(JSON.stringify({ title: title ?? "Error", status, detail, instance: "/api/backtest/", error: detail }), {
+    status,
+    headers: { "Content-Type": "application/problem+json", ...headers },
+  });
+}
+
+/** Routes for a healthy quant: /api/data and a backtest; override either. */
+export function quantRoutes(
+  overrides: { data?: FetchHandler; backtest?: FetchHandler } = {},
+): Record<string, FetchHandler> {
+  return {
+    [QUANT_DATA_ROUTE]: overrides.data ?? (() => json(QUANT_DATA_INFO)),
+    [BACKTEST_ROUTE]: overrides.backtest ?? (() => json(backtestResponse())),
+  };
+}

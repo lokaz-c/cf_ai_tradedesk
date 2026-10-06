@@ -66,7 +66,7 @@ const MASKS = [
 ];
 
 /** A count or a period follows: "20-day", "14 sessions", "3 trades". */
-const UNIT_AFTER =
+export const UNIT_AFTER =
   /^[\s-]?(?:days?|weeks?|months?|years?|sessions?|bars?|candles?|periods?|trades?|shares?|contracts?|lots?|pips?|ticks?|bps|basis\s+points?|minutes?|hours?|times)\b/i;
 /** An indicator length: "SMA 200", "the 200 SMA", "RSI 14". */
 const INDICATOR_BEFORE = /\b(?:SMA|EMA|MA|RSI|ATR|MACD|period|length|lookback)\s*$/i;

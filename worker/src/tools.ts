@@ -14,7 +14,14 @@
  * are never streamed.
  */
 
-import { backtestExecutor, backtestNote, BACKTEST_TOOL, type BacktestEnv, type BacktestVars } from "./backtest";
+import {
+  backtestExecutor,
+  backtestNote,
+  BACKTEST_TOOL,
+  nullMetricClaims,
+  type BacktestEnv,
+  type BacktestVars,
+} from "./backtest";
 import { checkAnswer, type Citation, type Fact, type Unverified } from "./grounding";
 import { intVar } from "./limits";
 import {
@@ -502,14 +509,18 @@ export function groundAnswer(
   question: string,
 ): { notes: string; meta: GroundingMeta } {
   const facts = outcomes.flatMap((o) => o.facts);
-  const { citations, unverified } = checkAnswer(reply, facts, question);
+  const backtests = outcomes.flatMap((o) => (o.backtest ? [o.backtest] : []));
+  const { citations, unverified: plain } = checkAnswer(reply, facts, question);
+  // A number given for a metric quant reported as n/a replaces its plain entry, so it is listed once, with the metric.
+  const claims = nullMetricClaims(reply, backtests);
+  const unverified = [...plain.filter((u) => !claims.some((c) => c.value === u.value)), ...claims];
   return {
     notes: formatNotes(dataNotes(outcomes, unverified.map((u) => u.text))),
     meta: {
       data: outcomes.map((o) => o.status),
       citations,
       unverified,
-      backtests: outcomes.flatMap((o) => (o.backtest ? [o.backtest] : [])),
+      backtests,
     },
   };
 }

@@ -2,7 +2,13 @@ import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { utcDay } from "../src/limits";
 import { hang, json, mockFetch } from "./fetch-mock";
-import { BACKTEST_ROUTE, backtestResponse, marketDataRoutes, QUANT_METRICS } from "./fixtures";
+import {
+  marketDataRoutes,
+  oneWinnerResponse,
+  QUANT_METRICS,
+  quantProblem,
+  quantRoutes,
+} from "./fixtures";
 import {
   aiInputs,
   clearD1,
@@ -56,7 +62,7 @@ describe("run_backtest", () => {
   it("runs the backtest on quant and streams a summary written from the returned metrics", async () => {
     await initSession("b-run", "AAPL", "D");
     await enableQuant("b-run");
-    const { requests } = mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    const { requests } = mockFetch(quantRoutes());
     const ai = mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], SUMMARY);
 
     const { res, body } = await ask("b-run", "Backtest the MA crossover on AAPL for 2023-2024, conservative.");
@@ -68,7 +74,8 @@ describe("run_backtest", () => {
     expect(round1.messages[0].content).toContain("call run_backtest once");
     expect(round1.messages[0].content).toContain("No market data source is connected");
 
-    expect(requests[0].json()).toEqual({
+    expect(requests.map((r) => `${r.method} ${new URL(r.url).pathname}`)).toEqual(["GET /api/data", "POST /api/backtest/"]);
+    expect(requests[1].json()).toEqual({
       strategy_name: "Moving Average Crossover",
       risk_config_name: "Conservative",
       start_date: "2023-01-01",
@@ -111,7 +118,7 @@ describe("run_backtest", () => {
   it("flags a metric the summary invented", async () => {
     await initSession("b-invent", "AAPL", "D");
     await enableQuant("b-invent");
-    mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    mockFetch(quantRoutes());
     mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["Total return -3.21% and a Sharpe of 1.45."]);
     const { body } = await ask("b-invent", "Backtest it.");
     expect(metaOf(body).unverified).toEqual([{ text: "1.45", value: 1.45 }]);
@@ -131,7 +138,7 @@ describe("run_backtest", () => {
   it("refuses invalid arguments before counting or calling quant", async () => {
     await initSession("b-invalid", "AAPL", "D");
     await enableQuant("b-invalid");
-    const { spy } = mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    const { spy } = mockFetch(quantRoutes());
     const ai = mockAiTools([toolCalls(["run_backtest", { ...MA_ON_AAPL, strategy: "martingale" }])], ["Not run."]);
 
     const { body } = await ask("b-invalid", "Backtest martingale.");
@@ -148,20 +155,20 @@ describe("run_backtest", () => {
   it("runs at most one backtest per question", async () => {
     await initSession("b-one", "AAPL", "D");
     await enableQuant("b-one");
-    const { requests } = mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    const { requests } = mockFetch(quantRoutes());
     mockAiTools(
       [toolCalls(["run_backtest", MA_ON_AAPL], ["run_backtest", { ...MA_ON_AAPL, symbol: "MSFT" }])],
       ["ok"],
     );
     const { body } = await ask("b-one", "Backtest AAPL and MSFT.");
-    expect(requests).toHaveLength(1);
+    expect(requests.filter((r) => r.method === "POST")).toHaveLength(1);
     expect(metaOf(body).data.map((d) => d.status).sort()).toEqual(["ok", "per_request_limit"]);
     expect(await backtestsToday()).toBe(1);
   });
 
   it("is rate-limited per IP with its own binding, more tightly than chat", async () => {
     // wrangler.toml: BACKTEST_RATE_LIMITER allows 2 per 60 s; chat allows 5.
-    mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    mockFetch(quantRoutes());
     const statuses: string[] = [];
     for (let i = 0; i < 3; i++) {
       const id = `b-limit-${i}`;
@@ -180,7 +187,7 @@ describe("run_backtest", () => {
     await initSession("b-limited", "AAPL", "D");
     await enableQuant("b-limited");
     await setSessionVars("b-limited", { BACKTEST_RATE_LIMITER: { limit: async () => ({ success: false }) } });
-    const { spy } = mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    const { spy } = mockFetch(quantRoutes());
     const ai = mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["Limited."]);
     const { body } = await ask("b-limited", "Backtest it.");
     expect(spy).not.toHaveBeenCalled();
@@ -191,7 +198,7 @@ describe("run_backtest", () => {
   });
 
   it("stops at the daily backtest budget, and is off at 0", async () => {
-    mockFetch({ [BACKTEST_ROUTE]: () => json(backtestResponse()) });
+    mockFetch(quantRoutes());
     await env.DB.prepare("INSERT INTO daily_usage (day, chat_requests, backtests) VALUES (?, 0, 20)")
       .bind(utcDay(new Date()))
       .run();
@@ -219,15 +226,93 @@ describe("run_backtest", () => {
   it("says so when quant is slow, and still answers", async () => {
     await initSession("b-slow", "AAPL", "D");
     await enableQuant("b-slow");
-    mockFetch({ [BACKTEST_ROUTE]: hang });
+    mockFetch(quantRoutes({ backtest: hang }));
     mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["The backtest timed out."]);
     const { body } = await ask("b-slow", "Backtest it.");
     expect(metaOf(body).data[0]).toMatchObject({
       status: "timeout",
-      detail: "quant did not finish the backtest within 0.1 s.",
+      detail: "quant did not finish the backtest within 0.1 s (QUANT_TIMEOUT_MS).",
     });
     expect(metaOf(body).backtests).toEqual([]);
-    expect(replyText(body)).toContain("- Backtest not run for AAPL: quant did not finish the backtest within 0.1 s.");
+    expect(replyText(body)).toContain(
+      "- Backtest not run for AAPL: quant did not finish the backtest within 0.1 s (QUANT_TIMEOUT_MS).",
+    );
     expect(sseEvents(body).at(-1)).toBe("[DONE]");
+  });
+  it("shows null metrics as n/a with quant's reason, and tells the model never to give a number", async () => {
+    await initSession("b-na", "AAPL", "D");
+    await enableQuant("b-na");
+    mockFetch(quantRoutes({ backtest: () => json(oneWinnerResponse()) }));
+    const ai = mockAiTools(
+      [toolCalls(["run_backtest", MA_ON_AAPL])],
+      ["One trade, a winner: win rate ", "100%", ", profit factor n/a (no losing trades)."],
+    );
+    const { body } = await ask("b-na", "Backtest it.");
+
+    const system = aiInputs(ai, 2).messages[0].content;
+    expect(system).toContain("avg_loss (Average loss, currency): n/a (no losing trades); quant has no value for it");
+    expect(system).toContain("profit_factor (Profit factor): n/a (no losing trades); quant has no value for it");
+    expect(system).toContain("A metric shown as n/a has no value for this run: write n/a with its reason in brackets, never a number.");
+
+    const meta = metaOf(body);
+    expect(meta.backtests[0]).toMatchObject({
+      metrics: expect.objectContaining({ avg_loss: null, profit_factor: null }),
+      undefinedMetrics: { avg_loss: "no losing trades", profit_factor: "no losing trades" },
+    });
+    expect(meta.citations.map((c) => c.label)).toEqual(["Win rate"]);
+    expect(meta.unverified).toEqual([]);
+  });
+
+  it("flags a number given for a metric quant reported as n/a", async () => {
+    await initSession("b-na-flag", "AAPL", "D");
+    await enableQuant("b-na-flag");
+    mockFetch(quantRoutes({ backtest: () => json(oneWinnerResponse()) }));
+    mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["Win rate 100% and a profit factor of 2.35."]);
+    const { body } = await ask("b-na-flag", "Backtest it.");
+    const text = "2.35 given for Profit factor, which quant reports as n/a (no losing trades)";
+    expect(metaOf(body).unverified).toEqual([{ text, value: 2.35 }]);
+    expect(replyText(body)).toContain(`- Not found in the retrieved data, so unverified: ${text}.`);
+  });
+
+  it("tells the model when quant is busy and how long to wait, without counting a result", async () => {
+    await initSession("b-busy", "AAPL", "D");
+    await enableQuant("b-busy");
+    mockFetch(
+      quantRoutes({
+        backtest: () =>
+          quantProblem(503, "The server is already running as many backtests as it allows at once; retry in 10 s", {
+            "Retry-After": "10",
+          }),
+      }),
+    );
+    const ai = mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["quant is busy; try again in 10 seconds."]);
+    const { body } = await ask("b-busy", "Backtest it.");
+    expect(aiInputs(ai, 2).messages[0].content).toContain(
+      "[BACKTEST run_backtest AAPL] NOT RUN. Say that the backtest could not be run and why; do not invent results. " +
+        "Reason: quant is busy (it runs a limited number of backtests at once); retry in 10 s.",
+    );
+    expect(metaOf(body).data[0]).toMatchObject({ service: "quant", status: "busy" });
+    expect(metaOf(body).backtests).toEqual([]);
+  });
+
+  it("reports quant's own time limit with the number quant published", async () => {
+    await initSession("b-504", "AAPL", "D");
+    await enableQuant("b-504");
+    mockFetch(quantRoutes({ backtest: () => quantProblem(504, "The backtest ran past this server's 90 s limit.") }));
+    mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["It timed out."]);
+    const { body } = await ask("b-504", "Backtest it.");
+    expect(metaOf(body).data[0]).toMatchObject({
+      status: "timeout",
+      detail: "quant stopped the backtest at its 90 s time limit. A shorter period runs faster.",
+    });
+  });
+
+  it("sends QUANT_API_KEY as X-API-Key", async () => {
+    await initSession("b-key", "AAPL", "D");
+    await enableQuant("b-key", { QUANT_API_KEY: "quant-secret" });
+    const { requests } = mockFetch(quantRoutes());
+    mockAiTools([toolCalls(["run_backtest", MA_ON_AAPL])], ["ok"]);
+    await ask("b-key", "Backtest it.");
+    expect(requests.map((r) => r.headers.get("X-API-Key"))).toEqual(["quant-secret", "quant-secret"]);
   });
 });
