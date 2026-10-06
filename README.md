@@ -6,7 +6,7 @@ A chat assistant for trading research that runs entirely on Cloudflare. You pick
 
 Built in April 2026 as the take-home for Cloudflare's software engineering internship. The brief asks for an LLM, a coordination layer, a chat input and persistent memory. `PROMPTS.md` lists the prompts used while building it, as the brief requires.
 
-**Live demo:** https://cf-ai-tradedesk.pages.dev. It runs an earlier build: it does not have the fixes listed under [Tests](#tests) or the input validation and front-end security fixes, and it has no rate limiting yet (see [Limitations](#limitations)).
+**Live demo:** https://cf-ai-tradedesk.pages.dev. It still runs an earlier build, without the security fixes, rate limits and caps described below, until it is redeployed (see [Deploying](#deploying)).
 
 ## Architecture
 
@@ -16,8 +16,9 @@ flowchart LR
     B -->|"GET /api/history/:ticker<br>GET /api/tickers"| W
     W -->|"idFromName(id)"| DO["TradeSession<br>Durable Object<br>one per session"]
     W -->|"history and rollup queries"| D1[("D1")]
-    DO <-->|"last 20 messages"| S[("DO storage")]
-    DO -->|"3 latest analyses for the ticker"| D1
+    W -.->|"per-IP limit"| RL["Rate Limiting<br>binding"]
+    DO <-->|"recent messages"| S[("DO storage")]
+    DO -->|"3 latest analyses for the ticker<br>daily budget"| D1
     DO -->|"stream: true"| AI["Workers AI<br>Llama 3.3 70B"]
     AI -->|"SSE"| DO
     DO -->|"tee: SSE to the browser"| B
@@ -30,18 +31,49 @@ The brief's four parts map to four pieces: Workers AI (`@cf/meta/llama-3.3-70b-i
 
 **One Durable Object per session.** The Worker maps the session ID in the URL to a Durable Object with `idFromName`. Cloudflare runs at most one instance per ID and delivers its requests on a single thread, so the session's state (ticker, timeframe, message history) has one owner and needs no locks in application code. One caveat: the object handles other requests while it awaits D1 or Workers AI, and the user's message is only stored once the reply has finished, so two overlapping chats in one session each build their context without the other's turn.
 
-**D1 for what outlives a session.** Every question and answer in a session that has a ticker is stored in D1 (SQLite), keyed by ticker. That table backs two things: the context for new requests (the three most recent analyses for the session's ticker) and the history sidebar (`/api/history/:ticker` and the per-ticker rollup `/api/tickers`). The schema is in `migrations/0001_init.sql`, with indexes on ticker, session ID and `created_at`. The ticker index serves both the history and the context queries, and SQLite sorts the matches for `ORDER BY created_at DESC` in a temporary B-tree. Neither query uses the `created_at` index on its own; a composite `(ticker, created_at)` index would remove the sort. To check the plan locally:
+**D1 for what outlives a session.** Every question and answer in a session that has a ticker is stored in D1 (SQLite), keyed by ticker. That table backs two things: the context for new requests (the three most recent analyses for the session's ticker) and the history sidebar (`/api/history/:ticker` and the per-ticker rollup `/api/tickers`). The schema is in `migrations/`. Both the history and the context queries are `WHERE ticker = ? ORDER BY created_at DESC LIMIT n`. With only a ticker index, SQLite found the matches and then sorted them in a temporary B-tree. Migration 0002 replaces it with a composite `(ticker, created_at)` index, which returns the rows already in order (read backwards), so the sort is gone and the scan stops after `n` rows. It also drops the `created_at` index, which no query used. `npm run db:explain` (from `worker/`) prints the plans after each migration, using a throwaway local D1:
 
-```bash
-cd worker && npm run db:migrate && npx wrangler d1 execute tradedesk-db --local \
-  --command "EXPLAIN QUERY PLAN SELECT * FROM analyses WHERE ticker = 'NQ' ORDER BY created_at DESC LIMIT 20"
+```
+After 0001_init.sql
+history:
+  SEARCH analyses USING INDEX idx_analyses_ticker (ticker=?)
+  USE TEMP B-TREE FOR ORDER BY
+context:
+  SEARCH analyses USING INDEX idx_analyses_ticker (ticker=?)
+  USE TEMP B-TREE FOR ORDER BY
+tickers:
+  SCAN analyses USING INDEX idx_analyses_ticker
+  USE TEMP B-TREE FOR ORDER BY
+
+After 0002_analyses_ticker_created_index.sql
+history:
+  SEARCH analyses USING INDEX idx_analyses_ticker_created (ticker=?)
+context:
+  SEARCH analyses USING INDEX idx_analyses_ticker_created (ticker=?)
+tickers:
+  SCAN analyses USING COVERING INDEX idx_analyses_ticker_created
+  USE TEMP B-TREE FOR ORDER BY
 ```
 
-**Context for each request.** The Durable Object sends the model the system prompt; when the session has a ticker, a line naming it and the timeframe, plus the three most recent analyses for that ticker, read from D1 on every request with each answer cut to 300 characters; then the last 20 stored messages and the new message. Retrieval is by recency, not vector search.
+The rollup's remaining sort is over one row per ticker (it orders by an aggregate), and the index now covers that query, so it no longer reads the table. The plans are for empty tables without `ANALYZE` statistics. A test in `d1.test.ts` asserts the history and context plans, so a schema change that brings the sort back fails CI.
+
+**Context for each request.** The Durable Object sends the model the system prompt; when the session has a ticker, a line naming it and the timeframe, plus the three most recent analyses for that ticker, read from D1 on every request with each question and answer cut to 300 characters; then the newest stored messages (at most 20, and at most `MAX_HISTORY_CHARS` characters, starting at a user turn) and the new message. Retrieval is by recency, not vector search.
 
 **Streaming and persistence.** Workers AI returns a server-sent event stream. The Durable Object splits it with `tee()`. One branch is the response body, so the browser renders tokens as they arrive. The other is read in the background (`waitUntil`) and reassembled into the full reply, which is appended to Durable Object storage and inserted into D1. Persistence never delays the first token. Both readers use the same parser (`shared/sse.ts`), which only parses complete lines and carries a partial line or a split UTF-8 character into the next network read.
 
 **Input and output handling.** Saved analyses are shared by every visitor, so the Worker validates what it stores: tickers must match `^[A-Z0-9]{1,10}([./-][A-Z0-9]{1,10})?$` after upper-casing (`GBP/USD`, `NQ`, `BRK.B`), timeframes must be one the page offers, and session IDs must be URL-safe. Anything else gets a 400 with an RFC 9457 problem body. The front end does not trust stored data either: values from the API are set with `textContent`, user messages are shown as plain text, and model replies are rendered with marked and sanitized with DOMPurify before they reach the DOM.
+
+**Limits for a public demo.** Chat is the only route that costs money: each request runs Llama 3.3 70B on the account that hosts the Worker. It has three limits, all set in `worker/wrangler.toml`:
+
+- *Per IP:* 5 chat requests per 60 seconds in each Cloudflare location, enforced with the [Workers Rate Limiting binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/rate-limit/) (`CHAT_RATE_LIMITER`). The router checks it before the Durable Object runs, keyed on `CF-Connecting-IP`, with IPv6 addresses cut to their /64 because one client usually holds a whole /64. Over the limit, chat returns 429 with `Retry-After` and a problem body.
+- *Per day, globally:* `DAILY_CHAT_BUDGET` (200) chat requests per UTC day across all users. The count lives in D1 (`daily_usage`, migration 0003) and is taken with one `INSERT ... ON CONFLICT DO UPDATE ... WHERE chat_requests < budget RETURNING`, so concurrent requests can't overshoot it. Only valid requests count. When it runs out, chat returns 429 until 00:00 UTC. Setting it to 0 turns chat off (503).
+- *Per request:* messages up to `MAX_MESSAGE_CHARS` (2,000) characters; longer ones get 413, and the body reader stops at a byte limit sized for a maximal message. History sent to the model is capped at `MAX_HISTORY_CHARS` (6,000) characters, and replies at `MAX_OUTPUT_TOKENS` (512, down from 1,024). Characters, not tokens: counting tokens would need the model's tokenizer in the Worker.
+
+Why the Rate Limiting binding for the per-IP limit: AI Gateway rate limiting applies one limit to every request through a gateway, so it can't tell visitors apart, and it is configured in the dashboard rather than in the repo. A Durable Object counter (one object per IP) would be exact, but it adds a Durable Object round trip to every chat request, plus windowing code to maintain. The binding is configured in `wrangler.toml`, runs locally in `wrangler dev` and in the vitest pool, and a check doesn't wait on the network. Its documented trade-off is accuracy: counts are kept per Cloudflare location and are eventually consistent. That is enough to slow down one visitor. The exact, global ceiling is the D1 budget, at the cost of one D1 write per chat request.
+
+At the defaults, the model generates at most 200 x 512 = 102,400 output tokens a day. At the [documented price](https://developers.cloudflare.com/workers-ai/models/llama-3.3-70b-instruct-fp8-fast/) ($0.293 per million input tokens, $2.253 per million output tokens) and 24,000-token context window, 200 requests cost at most 200 x 24,000 x $0.293/M + 102,400 x $2.253/M, about $1.64 a day. That bound assumes every request fills the context window; the character caps keep real requests below it.
+
+**CORS.** Only the origins in `ALLOWED_ORIGINS` (the Pages site, and the Vite dev server, whose proxy forwards its own origin) get CORS headers. A browser request from any other origin, preflight included, gets a 403 before it reaches a route. That stops other sites from spending the demo's budget through their visitors' browsers. It does nothing against scripts, which send no Origin header; the limits above cover those.
 
 ## Run it locally
 
@@ -55,7 +87,7 @@ npm install                          # also installs worker/ and frontend/
 npm run dev                          # open http://localhost:5173
 ```
 
-`npm run dev` applies the D1 migrations to a local database, starts the Worker on port 8787 with local Durable Objects and D1, and starts Vite on port 5173, which proxies `/api` to the Worker. Workers AI has no local simulator, so chat requests go to your Cloudflare account and count toward its Workers AI usage. Without a login, `npm run dev` exits with an authentication error. Use `npm run dev:no-ai` instead: everything except chat works, and chat requests return 500.
+`npm run dev` applies the D1 migrations to a local database, starts the Worker on port 8787 with local Durable Objects and D1, and starts Vite on port 5173, which proxies `/api` to the Worker. Workers AI has no local simulator, so chat requests go to your Cloudflare account and count toward its Workers AI usage. Without a login, `npm run dev` exits with an authentication error. Use `npm run dev:no-ai` instead: everything except chat works, and chat requests return 500. The local Worker applies the same limits as production (see [Limits for a public demo](#design-notes)), including 5 chat requests a minute; change them in `worker/wrangler.toml`.
 
 ## Tests
 
@@ -64,15 +96,16 @@ npm test             # from the repo root: the Worker suite, then the front-end 
 npm run typecheck
 ```
 
-There are 206 tests: 138 for the Worker and 68 for the front end (counts from `npm test`; CI runs the same two suites).
+There are 273 tests: 205 for the Worker and 68 for the front end (counts from `npm test`; CI runs the same two suites).
 
 The Worker tests run inside workerd through `@cloudflare/vitest-plugin`, with the real Durable Object class and a local D1 database migrated from `migrations/`. Workers AI is replaced by a fake that returns a Workers AI style SSE stream, and remote bindings are disabled, so the tests never call a Cloudflare account.
 
-- `routing.test.ts`: status codes, method handling, 404s and CORS headers for every route.
+- `routing.test.ts`: status codes, method handling, 404s and CORS headers for every route; the origin allow-list, including look-alike origins and preflights.
 - `context.test.ts`: the 20-message window (at 0, 1, 19, 20, 21 and 30 stored messages), the three newest same-ticker analyses in order with answers cut to 300 characters, and that D1 is read on every request.
-- `d1.test.ts`: the migrated schema and indexes, the history route's limit and ordering, the rollup's counts and ordering, and session upserts with foreign keys enforced.
+- `d1.test.ts`: the migrated schema and indexes, the query plans (no temporary B-tree for history or context), the history route's limit and ordering, the rollup's counts and ordering, and session upserts with foreign keys enforced.
 - `chat.test.ts`: the SSE bytes the client receives, the first event arriving before the model finishes, and the tee'd copy written to Durable Object storage and D1.
 - `validation.test.ts`: accepted and rejected tickers, timeframes, session IDs and request bodies; rejected input stores nothing and never reaches the model; stored markup comes back as JSON with `nosniff`.
+- `limits.test.ts`: the per-IP limit, mocked (429 body and `Retry-After`, nothing reaches the Durable Object, the key for IPv4, IPv6 and IPv4-mapped addresses) and with the local rate-limit binding (one address blocked, another not); the daily budget (the last slot, exhaustion until 00:00 UTC, concurrent requests, rejected requests not counted, 0 turns chat off); the message, body, history and `max_tokens` caps; and parsing of the vars.
 
 The front-end tests (`frontend/test/`) run in vitest with jsdom. They check that HTML payloads in a ticker, question, timestamp, user message or model reply (saved or streamed) render as inert text or sanitized markup while ordinary markdown survives, and that the on-screen reply is complete when the stream arrives in 1, 2, 3, 7, 64 or 4,096-byte reads.
 
@@ -83,24 +116,27 @@ Writing the tests found three bugs, all now fixed. The history route rejected UR
 | Method | Route | Handled by |
 | --- | --- | --- |
 | POST | `/api/session/:id/init` | Durable Object: set the ticker and timeframe, upsert the session row in D1 |
-| POST | `/api/session/:id/chat` | Durable Object: stream a reply (SSE) and persist it in the background |
+| POST | `/api/session/:id/chat` | Durable Object: stream a reply (SSE) and persist it in the background. Rate-limited per IP and by the daily budget |
 | GET | `/api/session/:id/state` | Durable Object: the session and its message history |
 | DELETE | `/api/session/:id/clear` | Durable Object: clear the message history (ticker, timeframe and saved analyses stay) |
 | GET | `/api/history/:ticker` | Worker: the 20 most recent analyses for a ticker, from D1 |
 | GET | `/api/tickers` | Worker: tickers with their analysis count and latest timestamp, from D1 |
 
-All routes send `Access-Control-Allow-Origin: *` and `X-Content-Type-Options: nosniff`. Errors (400 for invalid input, 404 for unknown routes) use RFC 9457 problem details (`application/problem+json`).
+Requests from an origin in `ALLOWED_ORIGINS` get CORS headers for that origin; requests from other origins get 403. All responses send `X-Content-Type-Options: nosniff`. Errors use RFC 9457 problem details (`application/problem+json`): 400 for invalid input, 403 for a disallowed origin, 404 for unknown routes, 413 for an oversized message, 429 with `Retry-After` for the per-IP limit or the daily budget, and 503 when chat is turned off.
 
 ## Repository layout
 
 ```
 worker/src/index.ts       Worker router and the TradeSession Durable Object
 worker/src/validation.ts  ticker, timeframe, session ID and request body validation
-worker/src/http.ts        problem-details responses and JSON body parsing
+worker/src/limits.ts      limit vars, per-IP rate-limit key, history cap, daily budget
+worker/src/http.ts        problem-details responses, capped JSON body parsing, CORS allow-list
+worker/src/queries.ts     SQL for the analyses table
+worker/scripts/           explain-query-plan.mjs (npm run db:explain)
 worker/test/              Worker vitest suites and helpers
 shared/sse.ts             parses the Workers AI SSE stream; used by the Worker and the front end
-worker/wrangler.toml      bindings: AI, TRADE_SESSION (SQLite-backed Durable Object), DB (D1)
-migrations/0001_init.sql  sessions and analyses tables, indexes on ticker, session_id and created_at
+worker/wrangler.toml      bindings (AI, TRADE_SESSION, DB, CHAT_RATE_LIMITER) and limit vars
+migrations/               0001 tables and indexes, 0002 (ticker, created_at) index, 0003 daily_usage
 frontend/index.html       the chat page: markup and styles
 frontend/src/             page script: streaming markdown render (marked + DOMPurify), voice input
                           (Web Speech API), ticker and timeframe picker, quick prompts, history sidebar
@@ -110,11 +146,34 @@ PROMPTS.md                the system prompt and the prompts used while building 
 
 ## Deploying
 
-Do not deploy a public copy until rate limiting is in place (see Limitations). To deploy to your own account, from `worker/`: create a database with `npx wrangler d1 create tradedesk-db`, put its `database_id` in `wrangler.toml`, run `npx wrangler d1 migrations apply tradedesk-db --remote`, then `npx wrangler deploy`. For the front end, from `frontend/`: run `VITE_WORKER_URL=https://<your-worker>.workers.dev npm run build`, then `npx wrangler pages deploy dist --project-name <name>`.
+The Worker's bindings and settings are all in `worker/wrangler.toml`:
+
+| Name | Kind | Default | Purpose |
+| --- | --- | --- | --- |
+| `AI` | Workers AI binding | | the model |
+| `TRADE_SESSION` | Durable Object binding | | one object per chat session |
+| `DB` | D1 binding | | analyses, sessions, daily usage |
+| `CHAT_RATE_LIMITER` | Rate Limiting binding | 5 per 60 s | per-IP chat limit; `namespace_id` is any integer not used by another rate limiter on the account (period must be 10 or 60) |
+| `ALLOWED_ORIGINS` | var | `https://cf-ai-tradedesk.pages.dev,http://localhost:5173` | browser origins that may call the API |
+| `MAX_MESSAGE_CHARS` | var | 2000 | longest message accepted |
+| `MAX_HISTORY_CHARS` | var | 6000 | stored conversation sent per request |
+| `MAX_OUTPUT_TOKENS` | var | 512 | `max_tokens` per reply |
+| `DAILY_CHAT_BUDGET` | var | 200 | chat requests per UTC day, all users; 0 turns chat off |
+| `RATE_LIMIT_PERIOD_SECONDS` | var | 60 | `Retry-After` on a per-IP 429; keep equal to the binding's period |
+
+The rate limiter needs no resource created in advance. To deploy to your own account, from `worker/`:
+
+1. `npx wrangler d1 create tradedesk-db` and put its `database_id` in `wrangler.toml` (skip for an existing database).
+2. `npx wrangler d1 migrations apply tradedesk-db --remote`. Run this before deploying the Worker: the Worker writes to `daily_usage`, which migration 0003 creates.
+3. Set `ALLOWED_ORIGINS` to your Pages URL (and any custom domain), then `npx wrangler deploy`.
+4. From `frontend/`: `npm ci`, `VITE_WORKER_URL=https://<your-worker>.workers.dev npm run build`, then `npx wrangler pages deploy dist --project-name <name>`.
 
 ## Limitations
 
-- No rate limiting or token caps yet. Every chat request runs Llama 3.3 70B (up to 1,024 output tokens) on the account that hosts the Worker, and the API accepts cross-origin requests from any site.
+- The live demo runs an earlier build until it is redeployed: it has none of the security fixes, limits or caps above.
+- The per-IP limit is approximate: the binding counts per Cloudflare location and is eventually consistent. Visitors behind one NAT or IPv6 /64 share a limit.
+- The daily budget is shared, so one client cycling through many addresses can use it up and turn chat off for everyone until 00:00 UTC. Any request that passes validation counts, even if the model call then fails.
+- Only chat is rate-limited. `/init` writes one session row per call, and the read routes query D1, but neither calls the model.
 - No authentication. Session IDs are generated in the browser, and anyone with an ID can read that session. Saved analyses are global: every visitor's sidebar shows every saved analysis.
 - The model gets no market data. Any price level it states comes from its training data, not from a feed, so treat the output as a writing aid, not a signal.
 - Memory is by recency, not relevance. The three prepended analyses can come from the current session, so they can repeat what is already in the message window.
