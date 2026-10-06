@@ -98,3 +98,119 @@ export function showError(el, text) {
   line.textContent = text;
   el.replaceChildren(line);
 }
+
+// ── Grounding report ──────────────────────────────────────────
+
+const isObject = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+const text = (v) => (typeof v === 'string' ? v : '');
+const finite = (v) => typeof v === 'number' && Number.isFinite(v);
+
+/**
+ * Reads the report the Worker sends after a grounded answer (and stores with
+ * saved analyses): `{ data: [...], citations: [...], unverified: [...] }`.
+ * Accepts the object or its JSON text; anything malformed is dropped rather
+ * than trusted. Returns null when there is nothing to show.
+ */
+export function parseGrounding(value) {
+  let meta = value;
+  if (typeof value === 'string') {
+    try {
+      meta = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+  if (!isObject(meta)) return null;
+  const list = (v) => (Array.isArray(v) ? v.filter(isObject) : []);
+  const data = list(meta.data).map((d) => ({
+    ticker: text(d.ticker),
+    status: text(d.status),
+    source: text(d.source),
+    synthetic: d.synthetic === true,
+    asOf: text(d.asOf),
+    detail: text(d.detail),
+  }));
+  const citations = list(meta.citations)
+    .filter((c) => finite(c.value))
+    .map((c) => ({ label: text(c.label), value: c.value, ticker: text(c.ticker), kind: text(c.kind), source: text(c.source) }));
+  const unverified = list(meta.unverified)
+    .filter((u) => finite(u.value))
+    .map((u) => ({ text: text(u.text) || String(u.value), value: u.value }));
+  if (data.length === 0 && citations.length === 0 && unverified.length === 0) return null;
+  return { data, citations, unverified };
+}
+
+const UNAVAILABLE = new Set(['timeout', 'unavailable', 'rate_limited', 'bad_response']);
+
+/** One line per ticker and outcome: the data source, or why there was no data. */
+function sourceLine(doc, d) {
+  if (d.status === 'ok') {
+    const kind = d.synthetic ? 'synthetic' : 'real';
+    const line = element(doc, 'div', `grounding-source ${kind}`);
+    line.append(
+      element(doc, 'span', 'grounding-ticker', d.ticker),
+      element(doc, 'span', 'grounding-badge', d.synthetic ? 'SYNTHETIC DEMO DATA' : d.source.toUpperCase()),
+      element(
+        doc,
+        'span',
+        'grounding-detail',
+        `${d.synthetic ? 'generated prices, not real market prices' : 'market data'}${d.asOf ? ` · as of ${d.asOf}` : ''}`,
+      ),
+    );
+    return line;
+  }
+  const line = element(doc, 'div', 'grounding-source error');
+  line.append(
+    element(doc, 'span', 'grounding-ticker', d.ticker),
+    element(doc, 'span', 'grounding-badge', UNAVAILABLE.has(d.status) ? 'UNAVAILABLE' : 'NO DATA'),
+    element(doc, 'span', 'grounding-detail', d.detail),
+  );
+  return line;
+}
+
+/**
+ * The panel under a grounded answer: where its data came from (synthetic demo
+ * data is labelled as such), the levels it cited, and any price-like numbers
+ * that matched no provided value. Every value is set with textContent.
+ * Returns null when the report is empty or malformed.
+ */
+export function buildGroundingPanel(doc, value) {
+  const report = parseGrounding(value);
+  if (!report) return null;
+  const root = element(doc, 'div', 'grounding');
+
+  const seen = new Set();
+  for (const d of report.data) {
+    const key = `${d.ticker}|${d.status}|${d.source}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    root.append(sourceLine(doc, d));
+  }
+
+  if (report.citations.length > 0) {
+    const section = element(doc, 'div', 'grounding-section');
+    section.append(element(doc, 'div', 'grounding-label', 'Levels cited'));
+    const list = element(doc, 'ul', 'grounding-list');
+    for (const c of report.citations) {
+      const item = element(doc, 'li', 'grounding-cited');
+      item.append(
+        element(doc, 'span', 'cited-label', c.label),
+        element(doc, 'span', 'cited-value', String(c.value)),
+        element(doc, 'span', 'cited-ticker', c.source === 'synthetic' ? `${c.ticker} · synthetic` : c.ticker),
+      );
+      list.append(item);
+    }
+    section.append(list);
+    root.append(section);
+  }
+
+  if (report.unverified.length > 0) {
+    const section = element(doc, 'div', 'grounding-section warn');
+    section.append(element(doc, 'div', 'grounding-label', 'Not in the data (unverified)'));
+    const list = element(doc, 'ul', 'grounding-list');
+    for (const u of report.unverified) list.append(element(doc, 'li', 'grounding-unverified', u.text));
+    section.append(list);
+    root.append(section);
+  }
+  return root;
+}
