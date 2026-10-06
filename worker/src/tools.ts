@@ -14,6 +14,7 @@
  * are never streamed.
  */
 
+import { backtestExecutor, backtestNote, BACKTEST_TOOL, type BacktestEnv, type BacktestVars } from "./backtest";
 import { checkAnswer, type Citation, type Fact, type Unverified } from "./grounding";
 import { intVar } from "./limits";
 import {
@@ -28,11 +29,14 @@ import {
   type MarketDataConfig,
   type MarketDataVars,
 } from "./marketdata";
+import { readQuantConfig, type BacktestRun, type QuantVars } from "./quant";
 
-export interface ToolVars extends MarketDataVars {
+export interface ToolVars extends MarketDataVars, QuantVars, BacktestVars {
   /** Non-streamed tool rounds before the final, streamed answer (default 2, 1-4). */
   MAX_TOOL_ROUNDS?: unknown;
 }
+
+export type ToolEnv = ToolVars & BacktestEnv;
 
 export interface ChatMessage {
   role: "user" | "assistant" | "system" | "tool";
@@ -57,9 +61,11 @@ export interface ToolCall {
 /** What one tool call returned, for the trailer the page reads. */
 export interface DataStatus {
   tool: string;
-  service: "market-data";
+  service: "market-data" | "quant";
+  /** The ticker, or the backtest's symbol. */
   ticker: string;
-  status: "ok" | FailureKind;
+  /** "ok", or why there is no data (a FailureKind, a quant failure, or a backtest limit). */
+  status: string;
   source?: string;
   synthetic?: boolean;
   asOf?: string;
@@ -72,10 +78,14 @@ export interface ToolOutcome {
   text: string;
   facts: Fact[];
   status: DataStatus;
+  /** For run_backtest: the run, shown as a table on the page. */
+  backtest?: BacktestRun;
 }
 
 export interface Toolset {
   schemas: ToolSchema[];
+  /** Added to the system prompt of the tool rounds. */
+  guidance: string;
   execute(call: ToolCall): Promise<ToolOutcome>;
 }
 
@@ -265,6 +275,7 @@ const FAILURE_ADVICE: Record<FailureKind, string> = {
   bad_response: "UNAVAILABLE. Say that market data is unavailable right now; do not state levels.",
 };
 
+/** A failed market-data call. */
 function failureOutcome(call: ToolCall, ticker: string, kind: FailureKind, detail: string): ToolOutcome {
   return {
     call,
@@ -285,6 +296,7 @@ export function daysArg(value: unknown): number {
   return Math.min(MAX_BAR_DAYS, Math.max(1, Math.round(n)));
 }
 
+/** Runs get_levels or get_recent_bars. */
 export async function runMarketDataTool(cfg: MarketDataConfig, call: ToolCall): Promise<ToolOutcome> {
   const ticker = tickerArg(call);
   if (call.name === "get_levels") {
@@ -331,13 +343,35 @@ export async function runMarketDataTool(cfg: MarketDataConfig, call: ToolCall): 
   };
 }
 
-/** The tools this deployment can offer, or null when no data service is configured. */
-export function buildToolset(env: ToolVars): Toolset | null {
+const MARKET_DATA_GUIDANCE =
+  "Before stating any level for a ticker, call get_levels; for recent price action, call get_recent_bars. " +
+  "Use the session's ticker unless the user names another one.";
+const NO_MARKET_DATA_GUIDANCE =
+  'No market data source is connected, so you have no price levels: write "no data" where a level would go.';
+const BACKTEST_GUIDANCE =
+  "To backtest a strategy on a symbol, call run_backtest once, with the strategy, symbol, dates and risk profile the user gave.";
+
+/**
+ * The tools this deployment can offer for one chat request, or null when no
+ * data service is configured. `clientIp` keys the per-IP backtest limit.
+ */
+export function buildToolset(env: ToolEnv, clientIp: string | null): Toolset | null {
   const marketData = readMarketDataConfig(env);
-  if (!marketData) return null;
+  const quant = readQuantConfig(env);
+  if (!marketData && !quant) return null;
+  const schemas = [...(marketData ? MARKET_DATA_TOOLS : []), ...(quant ? [BACKTEST_TOOL] : [])];
+  const runBacktestTool = quant ? backtestExecutor(quant, env, clientIp) : null;
+  const guidance = [
+    "You have tools that fetch data.",
+    marketData ? MARKET_DATA_GUIDANCE : NO_MARKET_DATA_GUIDANCE,
+    ...(quant ? [BACKTEST_GUIDANCE] : []),
+    "If the question needs no data, answer without calling a tool.",
+  ].join(" ");
   return {
-    schemas: MARKET_DATA_TOOLS,
-    execute: (call) => runMarketDataTool(marketData, call),
+    schemas,
+    guidance,
+    execute: (call) =>
+      call.name === BACKTEST_TOOL.name ? runBacktestTool!(call) : runMarketDataTool(marketData!, call),
   };
 }
 
@@ -412,18 +446,22 @@ function list(items: string[]): string {
  * model wrote.
  */
 export function dataNotes(outcomes: ToolOutcome[], unverified: string[]): string[] {
-  const notes: string[] = [];
   const bySource = new Map<string, Set<string>>();
-  const failures = new Map<string, string>();
-  for (const { status } of outcomes) {
-    if (status.status === "ok" && status.source) {
+  const backtests = new Map<string, string>();
+  const missing = new Map<string, string>();
+  for (const outcome of outcomes) {
+    const { status } = outcome;
+    if (status.service === "quant") {
+      backtests.set(`${status.ticker}|${status.status}`, backtestNote(outcome));
+    } else if (status.status === "ok" && status.source) {
       const tickers = bySource.get(status.source) ?? new Set<string>();
       tickers.add(status.ticker);
       bySource.set(status.source, tickers);
     } else if (status.status !== "ok") {
-      failures.set(`${status.ticker}|${status.status}`, `No market data for ${status.ticker}: ${status.detail}`);
+      missing.set(`${status.ticker}|${status.status}`, `No market data for ${status.ticker}: ${status.detail}`);
     }
   }
+  const notes: string[] = [];
   for (const [source, tickers] of bySource) {
     const names = list([...tickers]);
     notes.push(
@@ -432,7 +470,7 @@ export function dataNotes(outcomes: ToolOutcome[], unverified: string[]): string
         : `Market data for ${names}: ${sourceLabel(source)}, daily bars.`,
     );
   }
-  notes.push(...failures.values());
+  notes.push(...missing.values(), ...backtests.values());
   if (unverified.length > 0) {
     notes.push(`Not found in the retrieved data, so unverified: ${unverified.join(", ")}.`);
   }
@@ -449,6 +487,8 @@ export interface GroundingMeta {
   data: DataStatus[];
   citations: Citation[];
   unverified: Unverified[];
+  /** Backtests that ran for this answer, with the metrics as quant returned them. */
+  backtests: BacktestRun[];
 }
 
 /**
@@ -465,6 +505,11 @@ export function groundAnswer(
   const { citations, unverified } = checkAnswer(reply, facts, question);
   return {
     notes: formatNotes(dataNotes(outcomes, unverified.map((u) => u.text))),
-    meta: { data: outcomes.map((o) => o.status), citations, unverified },
+    meta: {
+      data: outcomes.map((o) => o.status),
+      citations,
+      unverified,
+      backtests: outcomes.flatMap((o) => (o.backtest ? [o.backtest] : [])),
+    },
   };
 }

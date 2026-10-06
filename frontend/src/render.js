@@ -123,6 +123,7 @@ export function parseGrounding(value) {
   if (!isObject(meta)) return null;
   const list = (v) => (Array.isArray(v) ? v.filter(isObject) : []);
   const data = list(meta.data).map((d) => ({
+    service: text(d.service),
     ticker: text(d.ticker),
     status: text(d.status),
     source: text(d.source),
@@ -136,14 +137,75 @@ export function parseGrounding(value) {
   const unverified = list(meta.unverified)
     .filter((u) => finite(u.value))
     .map((u) => ({ text: text(u.text) || String(u.value), value: u.value }));
-  if (data.length === 0 && citations.length === 0 && unverified.length === 0) return null;
-  return { data, citations, unverified };
+  const backtests = list(meta.backtests).map((b) => ({
+    backtestId: finite(b.backtestId) ? b.backtestId : null,
+    strategy: text(b.strategy),
+    symbol: text(b.symbol),
+    startDate: text(b.startDate),
+    endDate: text(b.endDate),
+    riskProfile: text(b.riskProfile),
+    initialCapital: finite(b.initialCapital) ? b.initialCapital : null,
+    synthetic: b.synthetic !== false,
+    dataFile: text(b.dataFile),
+    metrics: Object.fromEntries(
+      BACKTEST_METRICS.map(({ key }) => [key, isObject(b.metrics) && finite(b.metrics[key]) ? b.metrics[key] : null]),
+    ),
+  }));
+  if (data.length === 0 && citations.length === 0 && unverified.length === 0 && backtests.length === 0) return null;
+  return { data, citations, unverified, backtests };
+}
+
+/** quant's metrics, in the order and units the Worker documents (worker/src/backtest.ts). */
+export const BACKTEST_METRICS = [
+  { key: 'total_return', label: 'Total return', unit: 'percent' },
+  { key: 'cagr', label: 'CAGR', unit: 'percent' },
+  { key: 'max_drawdown', label: 'Max drawdown', unit: 'percent' },
+  { key: 'volatility', label: 'Volatility (annualised)', unit: 'percent' },
+  { key: 'sharpe_ratio', label: 'Sharpe ratio', unit: 'ratio' },
+  { key: 'win_rate', label: 'Win rate', unit: 'percent' },
+  { key: 'avg_win', label: 'Average win', unit: 'currency' },
+  { key: 'avg_loss', label: 'Average loss', unit: 'currency' },
+  { key: 'num_trades', label: 'Trades', unit: 'count' },
+  { key: 'final_equity', label: 'Final equity', unit: 'currency' },
+  { key: 'profit_factor', label: 'Profit factor', unit: 'ratio' },
+  { key: 'max_consecutive_wins', label: 'Max consecutive wins', unit: 'count' },
+  { key: 'max_consecutive_losses', label: 'Max consecutive losses', unit: 'count' },
+];
+
+/** A metric as quant returned it, rounded for display; null (Infinity or NaN in quant's response) is "not finite". */
+export function formatMetric(value, unit) {
+  if (!finite(value)) return 'not finite';
+  switch (unit) {
+    case 'percent':
+      return `${value.toFixed(2)}%`;
+    case 'currency':
+      return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    case 'count':
+      return String(Math.round(value));
+    default:
+      return value.toFixed(2);
+  }
 }
 
 const UNAVAILABLE = new Set(['timeout', 'unavailable', 'rate_limited', 'bad_response']);
 
 /** One line per ticker and outcome: the data source, or why there was no data. */
 function sourceLine(doc, d) {
+  if (d.service === 'quant') {
+    const ok = d.status === 'ok';
+    const line = element(doc, 'div', `grounding-source ${ok ? (d.synthetic ? 'synthetic' : 'real') : 'error'}`);
+    line.append(
+      element(doc, 'span', 'grounding-ticker', d.ticker),
+      element(doc, 'span', 'grounding-badge', ok ? (d.synthetic ? 'BACKTEST · SYNTHETIC DATA' : 'BACKTEST') : 'BACKTEST NOT RUN'),
+      element(
+        doc,
+        'span',
+        'grounding-detail',
+        ok ? (d.synthetic ? "quant's synthetic dataset; symbol names are labels only, not real prices" : "quant's dataset") : d.detail,
+      ),
+    );
+    return line;
+  }
   if (d.status === 'ok') {
     const kind = d.synthetic ? 'synthetic' : 'real';
     const line = element(doc, 'div', `grounding-source ${kind}`);
@@ -187,11 +249,12 @@ export function buildGroundingPanel(doc, value) {
     root.append(sourceLine(doc, d));
   }
 
-  if (report.citations.length > 0) {
+  const levels = report.citations.filter((c) => c.kind !== 'backtest');
+  if (levels.length > 0) {
     const section = element(doc, 'div', 'grounding-section');
     section.append(element(doc, 'div', 'grounding-label', 'Levels cited'));
     const list = element(doc, 'ul', 'grounding-list');
-    for (const c of report.citations) {
+    for (const c of levels) {
       const item = element(doc, 'li', 'grounding-cited');
       item.append(
         element(doc, 'span', 'cited-label', c.label),
@@ -204,6 +267,8 @@ export function buildGroundingPanel(doc, value) {
     root.append(section);
   }
 
+  for (const b of report.backtests) root.append(buildBacktestTable(doc, b));
+
   if (report.unverified.length > 0) {
     const section = element(doc, 'div', 'grounding-section warn');
     section.append(element(doc, 'div', 'grounding-label', 'Not in the data (unverified)'));
@@ -213,4 +278,45 @@ export function buildGroundingPanel(doc, value) {
     root.append(section);
   }
   return root;
+}
+
+/** The metrics of one backtest, as quant returned them, with its data source. */
+export function buildBacktestTable(doc, b) {
+  const section = element(doc, 'div', 'grounding-section grounding-backtest');
+  section.append(
+    element(doc, 'div', 'grounding-label', `Backtest${b.backtestId !== null ? ` · quant run ${b.backtestId}` : ''}`),
+    element(
+      doc,
+      'div',
+      'backtest-title',
+      [
+        `${b.strategy} on ${b.symbol}`,
+        b.startDate && b.endDate ? `${b.startDate} to ${b.endDate}` : '',
+        b.riskProfile,
+        b.initialCapital !== null ? `initial capital ${formatMetric(b.initialCapital, 'currency')}` : '',
+      ]
+        .filter(Boolean)
+        .join(' · '),
+    ),
+  );
+  const table = element(doc, 'table', 'backtest-table');
+  const tbody = element(doc, 'tbody');
+  for (const { key, label, unit } of BACKTEST_METRICS) {
+    const row = element(doc, 'tr');
+    row.append(element(doc, 'th', '', label), element(doc, 'td', '', formatMetric(b.metrics[key], unit)));
+    tbody.append(row);
+  }
+  table.append(tbody);
+  section.append(
+    table,
+    element(
+      doc,
+      'div',
+      'backtest-note',
+      b.synthetic
+        ? `Synthetic data (quant's ${b.dataFile || 'sample dataset'}); symbol names are labels only, not real prices.`
+        : `Data: quant's ${b.dataFile}, reported by quant as not synthetic.`,
+    ),
+  );
+  return section;
 }

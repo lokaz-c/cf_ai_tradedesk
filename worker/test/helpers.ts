@@ -1,7 +1,7 @@
 import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { expect, vi } from "vitest";
-import { MARKET_DATA_URL } from "./fixtures";
+import { MARKET_DATA_URL, QUANT_URL } from "./fixtures";
 
 export const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -139,6 +139,11 @@ export function enableMarketData(sessionId: string, vars: Record<string, unknown
   return setSessionVars(sessionId, { MARKET_DATA_URL, MARKET_DATA_TIMEOUT_MS: 100, ...vars });
 }
 
+/** Points one session at the stubbed quant API, with a short timeout. */
+export function enableQuant(sessionId: string, vars: Record<string, unknown> = {}) {
+  return setSessionVars(sessionId, { QUANT_API_URL: QUANT_URL, QUANT_TIMEOUT_MS: 100, ...vars });
+}
+
 /** Splits a response body into its SSE data payloads (JSON parsed, [DONE] kept as a string). */
 export function sseEvents(body: string): unknown[] {
   return body
@@ -152,6 +157,30 @@ export function replyText(body: string): string {
   return sseEvents(body)
     .map((e) => (typeof e === "object" && e !== null && "response" in e ? String((e as { response: string }).response) : ""))
     .join("");
+}
+
+/** The grounding report a response ends with. */
+export interface Meta {
+  data: { tool: string; service: string; ticker: string; status: string; source?: string; synthetic?: boolean; asOf?: string; detail?: string }[];
+  citations: { text: string; value: number; label: string; ticker: string; kind: string; source: string }[];
+  unverified: { text: string; value: number }[];
+  backtests: unknown[];
+}
+
+export function metaOf(body: string): Meta {
+  const event = sseEvents(body).find((e) => typeof e === "object" && e !== null && "tradedesk" in e);
+  expect(event, "a tradedesk event").toBeDefined();
+  return (event as { tradedesk: Meta }).tradedesk;
+}
+
+export async function savedAnalysis(sessionId: string) {
+  return vi.waitFor(async () => {
+    const row = await env.DB.prepare("SELECT ai_response, grounding FROM analyses WHERE session_id = ?")
+      .bind(sessionId)
+      .first<{ ai_response: string; grounding: string | null }>();
+    expect(row).not.toBeNull();
+    return row!;
+  });
 }
 
 /** The `inputs` argument of the n-th env.AI.run call. */

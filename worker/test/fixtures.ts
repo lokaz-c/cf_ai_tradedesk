@@ -74,3 +74,53 @@ export function marketDataRoutes(
     [BARS_ROUTE]: overrides.bars ?? ((_req, { ticker }) => json(barsFor(ticker))),
   };
 }
+
+// quant (lokaz-c/quant, app/routes/backtest_routes.py and
+// app/services/backtest_service.py). Hand-made metric values.
+
+export const QUANT_URL = "https://quant.test";
+export const BACKTEST_ROUTE = `POST ${QUANT_URL}/api/backtest/`;
+export const QUANT_DATA_ROUTE = `GET ${QUANT_URL}/api/data`;
+
+export const QUANT_DATA_SOURCE = {
+  synthetic: true,
+  file: "data/sample_data.csv",
+  description:
+    "Synthetic daily bars from a seeded Markov regime-switching GBM (config/data_generator.json). Ticker names are labels only.",
+};
+
+export const QUANT_METRICS = {
+  total_return: -3.2117,
+  cagr: -1.6234,
+  max_drawdown: 12.4871,
+  volatility: 9.8812,
+  sharpe_ratio: -0.2156,
+  win_rate: 41.6667,
+  avg_win: 812.43,
+  avg_loss: -655.1,
+  num_trades: 12,
+  final_equity: 96788.3,
+  profit_factor: 0.8834,
+  max_consecutive_wins: 2,
+  max_consecutive_losses: 4,
+};
+
+export function backtestResponse(overrides: Record<string, unknown> = {}) {
+  return {
+    backtest_id: 42,
+    status: "completed",
+    metrics: QUANT_METRICS,
+    summary: { equity: 96788.3, cash: 96788.3, positions: 0, total_return: -0.032117 },
+    data: QUANT_DATA_SOURCE,
+    baseline: null,
+    ...overrides,
+  };
+}
+
+export const QUANT_DATA_INFO = {
+  ...QUANT_DATA_SOURCE,
+  symbols: ["AAPL", "MSFT", "NVDA"],
+  start_date: "2020-01-01",
+  end_date: "2024-12-31",
+  bars: 1305,
+};

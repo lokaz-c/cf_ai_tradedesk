@@ -28,12 +28,31 @@ function compile(key: string, handler: FetchHandler): Route {
   return { method, pattern: new RegExp(`^${source}$`), handler };
 }
 
+/**
+ * A request as the stub saw it. The body is read when the request is made:
+ * a body created inside a Durable Object cannot be read from the test.
+ */
+export interface RecordedRequest {
+  method: string;
+  url: string;
+  headers: Headers;
+  body: string;
+  json(): unknown;
+}
+
 export function mockFetch(routes: Record<string, FetchHandler>) {
   const compiled = Object.entries(routes).map(([key, handler]) => compile(key, handler));
-  const requests: Request[] = [];
+  const requests: RecordedRequest[] = [];
   const spy = vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
     const request = new Request(input as RequestInfo, init);
-    requests.push(request);
+    const body = await request.clone().text();
+    requests.push({
+      method: request.method,
+      url: request.url,
+      headers: new Headers(request.headers),
+      body,
+      json: () => JSON.parse(body),
+    });
     const url = new URL(request.url);
     const route = compiled.find(
       (r) => r.method === request.method && r.pattern.test(url.origin + url.pathname),

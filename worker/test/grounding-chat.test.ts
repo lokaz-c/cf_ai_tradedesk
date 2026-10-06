@@ -10,36 +10,16 @@ import {
   enableMarketData,
   getState,
   initSession,
+  metaOf,
   mockAiStream,
   mockAiTools,
   replyText,
+  savedAnalysis,
   sseEvents,
   toolCalls,
 } from "./helpers";
 
 beforeEach(clearD1);
-
-interface Meta {
-  data: { tool: string; service: string; ticker: string; status: string; source?: string; synthetic?: boolean; asOf?: string; detail?: string }[];
-  citations: { text: string; value: number; label: string; ticker: string; kind: string; source: string }[];
-  unverified: { text: string; value: number }[];
-}
-
-function metaOf(body: string): Meta {
-  const event = sseEvents(body).find((e) => typeof e === "object" && e !== null && "tradedesk" in e);
-  expect(event, "a tradedesk event").toBeDefined();
-  return (event as { tradedesk: Meta }).tradedesk;
-}
-
-async function savedAnalysis(sessionId: string) {
-  return vi.waitFor(async () => {
-    const row = await env.DB.prepare("SELECT ai_response, grounding FROM analyses WHERE session_id = ?")
-      .bind(sessionId)
-      .first<{ ai_response: string; grounding: string | null }>();
-    expect(row).not.toBeNull();
-    return row!;
-  });
-}
 
 /** A session on `ticker` with grounding on. */
 async function groundedSession(id: string, ticker = "S001", vars: Record<string, unknown> = {}) {
@@ -118,6 +98,7 @@ describe("tool rounds", () => {
         { text: "99.87", value: 99.8733, label: "S1", ticker: "S001", kind: "level", source: "synthetic" },
       ],
       unverified: [],
+      backtests: [],
     });
 
     // The saved copy has the same text, notes included, and the same report.
@@ -255,7 +236,7 @@ describe("tool rounds", () => {
     expect(spy).not.toHaveBeenCalled();
     expect(aiInputs(ai, 1).messages[0].content).toContain("[NO MARKET DATA RETRIEVED]");
     expect(replyText(body)).toBe("RSI measures momentum.");
-    expect(metaOf(body)).toEqual({ data: [], citations: [], unverified: [] });
+    expect(metaOf(body)).toEqual({ data: [], citations: [], unverified: [], backtests: [] });
   });
 
   it("still answers when a tool round fails", async () => {
@@ -336,6 +317,7 @@ describe("without a market-data URL", () => {
       data: [],
       citations: [],
       unverified: [{ text: "18,250", value: 18250 }],
+      backtests: [],
     });
     await vi.waitFor(() => expect(warn).toHaveBeenCalled());
   });

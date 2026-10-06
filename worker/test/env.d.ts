@@ -8,6 +8,7 @@ declare namespace Cloudflare {
     DB: D1Database;
     TRADE_SESSION: DurableObjectNamespace;
     CHAT_RATE_LIMITER: RateLimit;
+    BACKTEST_RATE_LIMITER: RateLimit;
     ALLOWED_ORIGINS: string;
     MAX_MESSAGE_CHARS: number;
     MAX_HISTORY_CHARS: number;
@@ -18,6 +19,9 @@ declare namespace Cloudflare {
     MARKET_DATA_DISPLAY_SOURCES: string;
     MARKET_DATA_TIMEOUT_MS: number;
     MAX_TOOL_ROUNDS: number;
+    QUANT_API_URL: string;
+    QUANT_TIMEOUT_MS: number;
+    DAILY_BACKTEST_BUDGET: number;
     // Test-only binding defined in vitest.config.ts.
     TEST_MIGRATIONS: import("cloudflare:test").D1Migration[];
   }
