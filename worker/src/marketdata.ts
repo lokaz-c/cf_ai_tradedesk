@@ -8,6 +8,8 @@
  * - GET /v1/bars/{ticker}?limit=: `{ ticker, source, adjustment, from, to,
  *   bars: [{ date, open, high, low, close, volume }], nextAfter }`, oldest
  *   first. Without dates the window is the year before the latest bar.
+ * - GET /v1/symbols?limit=: `{ symbols: [{ ticker, name, source, firstBar,
+ *   lastBar, lastClose }] }`.
  * - Errors are RFC 9457 problem details; 404 covers both "unknown ticker" and
  *   "not visible without a key". Anonymous requests are rate-limited per IP
  *   (429); an `X-API-Key` header lifts the limit and unlocks every source.
@@ -116,6 +118,13 @@ export interface BarsPage {
   from: string;
   to: string;
   bars: Bar[];
+}
+
+export interface SymbolSummary {
+  ticker: string;
+  name: string | null;
+  source: string;
+  lastBar: string | null;
 }
 
 export type FailureKind =
@@ -319,6 +328,28 @@ export async function getBars(cfg: MarketDataConfig, rawTicker: unknown): Promis
   const { nextAfter: _ignored, ...first } = page!;
   return displayable(cfg, { ...first, bars });
 }
+
+/** GET /v1/symbols: the symbols with data, limited to the sources this deployment may show. */
+export async function getSymbols(cfg: MarketDataConfig, limit = 50): Promise<Result<SymbolSummary[]>> {
+  const res = await getJson(cfg, `/v1/symbols?limit=${limit}`, "the symbol list");
+  if (!res.ok) return res;
+  if (!isObject(res.value) || !Array.isArray(res.value.symbols)) {
+    return fail("bad_response", "market-data returned the symbol list in an unexpected shape.");
+  }
+  const symbols: SymbolSummary[] = [];
+  for (const s of res.value.symbols) {
+    if (!isObject(s) || typeof s.ticker !== "string" || typeof s.source !== "string") continue;
+    if (!MARKET_DATA_TICKER.test(s.ticker) || !cfg.displaySources.has(s.source.toLowerCase())) continue;
+    symbols.push({
+      ticker: s.ticker,
+      name: typeof s.name === "string" ? s.name.slice(0, 80) : null,
+      source: s.source,
+      lastBar: typeof s.lastBar === "string" ? s.lastBar : null,
+    });
+  }
+  return { ok: true, value: symbols };
+}
+
 
 export function isSynthetic(source: string): boolean {
   return source.toLowerCase() === "synthetic";

@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     TRADE_SESSION: DurableObjectNamespace;
     CHAT_RATE_LIMITER: RateLimit;
     BACKTEST_RATE_LIMITER: RateLimit;
+    MARKET_RATE_LIMITER: RateLimit;
     ALLOWED_ORIGINS: string;
     MAX_MESSAGE_CHARS: number;
     MAX_HISTORY_CHARS: number;

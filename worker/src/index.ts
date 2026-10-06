@@ -23,6 +23,7 @@ import {
   selectHistory,
   type LimitVars,
 } from "./limits";
+import { marketRoute } from "./market-routes";
 import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "./queries";
 import { streamWithTrailer } from "./stream";
 import {
@@ -53,6 +54,8 @@ export interface Env extends LimitVars, ToolVars {
   CHAT_RATE_LIMITER: RateLimit;
   /** Per-IP limit on backtests, tighter than chat's. */
   BACKTEST_RATE_LIMITER: RateLimit;
+  /** Per-IP limit on the chart panel's market-data routes. */
+  MARKET_RATE_LIMITER: RateLimit;
 }
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -403,6 +406,10 @@ async function route(request: Request, env: Env): Promise<Response> {
 
     return Response.json(results);
   }
+
+  // Routes: GET /api/market/bars/:ticker and /api/market/symbols — market-data for the chart panel
+  const market = await marketRoute(request, env, url);
+  if (market) return market;
 
   // Route: GET /api/tickers — get all tickers with saved analyses
   if (url.pathname === "/api/tickers" && request.method === "GET") {
