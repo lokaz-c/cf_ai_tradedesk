@@ -70,11 +70,12 @@
     /* ── Layout ─────────────────────────────────────────────── */
     .app {
       display: grid;
-      grid-template-columns: 260px 1fr;
+      grid-template-columns: 260px 1fr 400px;
       grid-template-rows: 48px 1fr;
       height: 100vh;
       gap: 0;
     }
+
 
     /* ── Topbar ─────────────────────────────────────────────── */
     .topbar {
@@ -766,6 +767,73 @@
       min-height: 16px;
     }
 
+    /* ── Chart panel ──────────────────────────────────────────── */
+    .chart-panel {
+      background: var(--bg-panel);
+      border-left: 1px solid var(--border);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      min-height: 0;
+    }
+
+    .chart-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 12px 12px 4px;
+    }
+
+    .chart-header .sidebar-label { margin-bottom: 0; }
+    .chart-ticker { color: var(--accent); font-weight: 700; letter-spacing: 0.05em; font-size: 12px; }
+
+    .chart-source {
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .chart-source.synthetic { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,179,0,0.3); }
+    .chart-source.real { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+
+    .chart-status { padding: 0 12px 6px; font-size: 10px; color: var(--text-muted); }
+    .chart-box { flex: 1; min-height: 180px; margin: 0 8px; position: relative; }
+
+    .chart-section { padding: 8px 12px; border-top: 1px solid var(--border); }
+    .chart-empty { font-size: 11px; color: var(--text-muted); }
+
+    .chart-legend { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 11px; }
+    .chart-legend li { display: flex; align-items: center; gap: 5px; }
+    .legend-swatch { width: 10px; height: 2px; display: inline-block; }
+    .legend-label { color: var(--text-secondary); }
+    .legend-price { color: var(--text-primary); font-weight: 700; }
+
+    .symbol-chips { display: flex; flex-wrap: wrap; gap: 4px; max-height: 64px; overflow-y: auto; }
+
+    .symbol-chip {
+      padding: 2px 8px;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      font-family: var(--font-mono);
+      font-size: 10px;
+      color: var(--text-secondary);
+      cursor: pointer;
+    }
+
+    .symbol-chip:hover { border-color: var(--accent-dim); color: var(--accent); }
+
+    .chart-attribution {
+      padding: 6px 12px 8px;
+      border-top: 1px solid var(--border);
+      font-size: 9px;
+      color: var(--text-muted);
+    }
+
+    .chart-attribution a { color: var(--text-secondary); }
+
     /* ── Toast ───────────────────────────────────────────────── */
     .toast {
       position: fixed;
@@ -784,6 +852,16 @@
     }
 
     .toast.show { opacity: 1; transform: translateY(0); }
+
+    /* Narrow screens: the chart goes under the chat. */
+    @media (max-width: 1150px) {
+      .app {
+        grid-template-columns: 220px 1fr;
+        grid-template-rows: 48px 1fr 320px;
+      }
+      .sidebar { grid-row: 2 / 4; }
+      .chart-panel { grid-column: 2; grid-row: 3; border-left: none; border-top: 1px solid var(--border); }
+    }
   </style>
 </head>
 <body>
@@ -814,7 +892,8 @@
         <div class="sidebar-label">Session Setup</div>
         <div class="setup-field">
           <label>Instrument</label>
-          <input class="setup-input" id="tickerInput" type="text" placeholder="GBP/USD" value="GBP/USD" />
+          <input class="setup-input" id="tickerInput" type="text" placeholder="GBP/USD" value="GBP/USD" list="symbolList" />
+          <datalist id="symbolList"></datalist>
         </div>
         <div class="setup-field">
           <label>Timeframe</label>
@@ -903,6 +982,29 @@
         <div class="input-hint">Enter to send · Shift+Enter for newline · Ctrl+K to clear</div>
       </div>
     </main>
+
+    <!-- Chart panel: daily bars from market-data, and the levels the last answer cited -->
+    <aside class="chart-panel" id="chartPanel">
+      <div class="chart-header">
+        <span class="sidebar-label">Chart</span>
+        <span class="chart-ticker" id="chartTicker"></span>
+        <span class="chart-source" id="chartSource" hidden></span>
+      </div>
+      <div class="chart-status" id="chartStatus">Start a session to load daily bars from market-data.</div>
+      <div class="chart-box" id="chartBox"></div>
+      <div class="chart-section">
+        <div class="sidebar-label">Levels cited in the last answer</div>
+        <div id="chartLegend"><div class="chart-empty">None yet.</div></div>
+      </div>
+      <div class="chart-section" id="symbolSection" hidden>
+        <div class="sidebar-label">Symbols with data</div>
+        <div class="symbol-chips" id="symbolChips"></div>
+      </div>
+      <div class="chart-attribution">
+        Charts by <a href="https://www.tradingview.com/" target="_blank" rel="noopener noreferrer">TradingView Lightweight Charts™</a>.
+        Copyright (c) 2025 TradingView, Inc. https://www.tradingview.com/
+      </div>
+    </aside>
   </div>
 
   <div class="toast" id="toast"></div>
