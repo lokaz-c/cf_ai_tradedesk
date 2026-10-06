@@ -2,10 +2,17 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import worker from "../src/index";
 import { hang, json, mockFetch, networkError, problemResponse } from "./fetch-mock";
-import { BARS_ROUTE, barsFor, MARKET_DATA_URL, marketDataRoutes } from "./fixtures";
+import { CHART_BARS } from "../src/market-routes";
+import {
+  BARS_ROUTE,
+  barsFor,
+  MARKET_DATA_URL,
+  marketDataRateLimited,
+  marketDataRoutes,
+  symbolFor,
+  SYMBOLS_ROUTE,
+} from "./fixtures";
 import { api, expectProblem, ORIGIN } from "./helpers";
-
-const SYMBOLS_ROUTE = `GET ${MARKET_DATA_URL}/v1/symbols`;
 
 /**
  * Calls the Worker's fetch handler with extra vars, as wrangler.toml would
@@ -27,7 +34,7 @@ describe("GET /api/market/bars/:ticker", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("cache-control")).toBe("public, max-age=300");
     expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
-    const fixture = barsFor("S001");
+    const fixture = barsFor("S001", CHART_BARS);
     expect(await res.json()).toEqual({
       ticker: "S001",
       source: "synthetic",
@@ -38,7 +45,9 @@ describe("GET /api/market/bars/:ticker", () => {
       to: fixture.to,
       bars: fixture.bars,
     });
-    expect(requests.map((r) => r.url)).toEqual([`${MARKET_DATA_URL}/v1/bars/S001?limit=1000`]);
+    // One request for the latest year of sessions, not a year-long page trimmed afterwards.
+    expect(CHART_BARS).toBe(252);
+    expect(requests.map((r) => r.url)).toEqual([`${MARKET_DATA_URL}/v1/bars/S001?last=252`]);
   });
 
   it("sends the API key from the Worker, never from the browser", async () => {
@@ -72,11 +81,22 @@ describe("GET /api/market/bars/:ticker", () => {
     ["a timeout", hang, 504, "Gateway Timeout", "market-data did not answer within 0.1 s."],
     ["a connection failure", networkError, 502, "Bad Gateway", "market-data could not be reached."],
     ["a 500", () => problemResponse(500, "Unexpected error."), 502, "Bad Gateway", "market-data returned HTTP 500."],
-    ["its own 429", () => problemResponse(429, "Rate limit"), 503, "Service Unavailable", "market-data is rate-limiting this Worker; try again in a minute."],
+    ["its own 429 without a wait", () => problemResponse(429, "Rate limit"), 503, "Service Unavailable", "market-data is busy (rate limit reached); try again later."],
   ] as const)("maps market-data's %s", async (_name, handler, status, title, detail) => {
     mockFetch({ [BARS_ROUTE]: handler });
-    const body = await expectProblem(await get("/api/market/bars/S999"), status, title);
+    const res = await get("/api/market/bars/S999");
+    const body = await expectProblem(res, status, title);
     expect(body.detail).toBe(detail);
+    expect(res.headers.get("retry-after")).toBeNull();
+  });
+
+  it("passes market-data's wait on as Retry-After, readable by the page", async () => {
+    mockFetch({ [BARS_ROUTE]: () => marketDataRateLimited(12) });
+    const res = await get("/api/market/bars/S001");
+    const body = await expectProblem(res, 503, "Service Unavailable");
+    expect(body.detail).toBe("market-data is busy (rate limit reached); retry in 12 s.");
+    expect(res.headers.get("retry-after")).toBe("12");
+    expect(res.headers.get("access-control-expose-headers")).toContain("Retry-After");
   });
 
   it("refuses a source the deployment may not display", async () => {
@@ -115,25 +135,48 @@ describe("GET /api/market/symbols", () => {
       [SYMBOLS_ROUTE]: () =>
         json({
           symbols: [
-            { ticker: "S001", name: "Synthetic 001", source: "synthetic", firstBar: "2016-10-03", lastBar: "2026-10-02", lastClose: 101.23 },
-            { ticker: "AAPL", name: "Apple", source: "alpaca", firstBar: "2016-01-04", lastBar: "2026-10-02", lastClose: 1 },
-            { ticker: "S002", name: null, source: "synthetic", firstBar: "2016-10-03", lastBar: "2026-10-02", lastClose: 55.5 },
+            symbolFor("S001"),
+            symbolFor("AAPL", "alpaca", { name: "Apple", feed: "iex", lastIngestedAt: "2026-10-02T21:05:00Z" }),
+            symbolFor("S002", "synthetic", { name: null }),
           ],
+          nextAfter: null,
         }),
     });
     const res = await get("/api/market/symbols");
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       symbols: [
-        { ticker: "S001", name: "Synthetic 001", source: "synthetic", lastBar: "2026-10-02" },
-        { ticker: "S002", name: null, source: "synthetic", lastBar: "2026-10-02" },
+        { ticker: "S001", name: "Synthetic 001", source: "synthetic", lastBar: "2026-10-02", feed: null, lastIngestedAt: null },
+        { ticker: "S002", name: null, source: "synthetic", lastBar: "2026-10-02", feed: null, lastIngestedAt: null },
       ],
     });
+  });
+
+  it("pages through market-data's list with nextAfter", async () => {
+    const { requests } = mockFetch({
+      [SYMBOLS_ROUTE]: (request) =>
+        new URL(request.url).searchParams.get("after") === "S002"
+          ? json({ symbols: [symbolFor("S003")], nextAfter: null })
+          : json({ symbols: [symbolFor("S001"), symbolFor("S002")], nextAfter: "S002" }),
+    });
+    const res = await get("/api/market/symbols");
+    const { symbols } = (await res.json()) as { symbols: { ticker: string }[] };
+    expect(symbols.map((s) => s.ticker)).toEqual(["S001", "S002", "S003"]);
+    expect(requests).toHaveLength(2);
   });
 
   it("is 503 when market data is not connected, and 504 when it is slow", async () => {
     mockFetch({ [SYMBOLS_ROUTE]: hang });
     await expectProblem(await api("/api/market/symbols"), 503, "Service Unavailable");
     await expectProblem(await get("/api/market/symbols"), 504, "Gateway Timeout");
+  });
+
+  it("is 503 with Retry-After when market-data rate-limits the Worker", async () => {
+    mockFetch({ [SYMBOLS_ROUTE]: () => marketDataRateLimited(4) });
+    const res = await get("/api/market/symbols");
+    expect((await expectProblem(res, 503, "Service Unavailable")).detail).toBe(
+      "market-data is busy (rate limit reached); retry in 4 s.",
+    );
+    expect(res.headers.get("retry-after")).toBe("4");
   });
 });
