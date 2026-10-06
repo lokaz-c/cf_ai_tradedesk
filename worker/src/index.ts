@@ -17,7 +17,9 @@ import {
 import {
   chatBodyByteLimit,
   clientKey,
+  consumeDailyBudget,
   readLimits,
+  secondsUntilUtcMidnight,
   selectHistory,
   type LimitVars,
 } from "./limits";
@@ -163,6 +165,22 @@ export class TradeSession {
         return parsed.status === 413 ? contentTooLarge(parsed.detail) : badRequest(parsed.detail);
       }
       const body = parsed.value;
+
+      // Only valid requests count against the daily budget.
+      if (limits.dailyChatBudget === 0) {
+        return problem(503, "Service Unavailable", "Chat is turned off on this deployment.");
+      }
+      const now = new Date();
+      if (!(await consumeDailyBudget(this.env.DB, limits.dailyChatBudget, now))) {
+        const retryAfter = secondsUntilUtcMidnight(now);
+        return problem(
+          429,
+          "Too Many Requests",
+          `The demo has reached its limit of ${limits.dailyChatBudget} chat requests for today. It resets at 00:00 UTC.`,
+          { "Retry-After": String(retryAfter) },
+        );
+      }
+
       const session = await this.getSession();
 
       // The newest stored messages: at most 20, and at most maxHistoryChars characters.

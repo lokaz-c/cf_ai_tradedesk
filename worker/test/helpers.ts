@@ -182,5 +182,6 @@ export async function clearD1() {
   await env.DB.batch([
     env.DB.prepare("DELETE FROM analyses"),
     env.DB.prepare("DELETE FROM sessions"),
+    env.DB.prepare("DELETE FROM daily_usage"),
   ]);
 }

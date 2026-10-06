@@ -1,6 +1,6 @@
 /**
- * Limits for a public demo: what a single request may send and receive.
- * Values come from
+ * Limits for a public demo: what a single request may send and receive, and
+ * how many chat requests the deployment accepts per UTC day. Values come from
  * `[vars]` in wrangler.toml; a missing or invalid value falls back to the
  * default here, which matches the shipped wrangler.toml.
  */
@@ -9,6 +9,7 @@ export interface LimitVars {
   MAX_MESSAGE_CHARS?: unknown;
   MAX_HISTORY_CHARS?: unknown;
   MAX_OUTPUT_TOKENS?: unknown;
+  DAILY_CHAT_BUDGET?: unknown;
   RATE_LIMIT_PERIOD_SECONDS?: unknown;
 }
 
@@ -19,6 +20,8 @@ export interface Limits {
   maxHistoryChars: number;
   /** `max_tokens` for each reply. */
   maxOutputTokens: number;
+  /** Chat requests accepted per UTC day across all users; 0 turns chat off. */
+  dailyChatBudget: number;
   /** Retry-After for a per-IP 429; the period of the CHAT_RATE_LIMITER binding. */
   rateLimitPeriodSeconds: number;
 }
@@ -27,6 +30,7 @@ export const DEFAULT_LIMITS = {
   maxMessageChars: 2000,
   maxHistoryChars: 6000,
   maxOutputTokens: 512,
+  dailyChatBudget: 200,
   rateLimitPeriodSeconds: 60,
 } as const;
 
@@ -47,6 +51,7 @@ export function readLimits(env: LimitVars): Limits {
     maxHistoryChars: intVar(env.MAX_HISTORY_CHARS, d.maxHistoryChars, 0, 1_000_000),
     // The model's context window is 24,000 tokens.
     maxOutputTokens: intVar(env.MAX_OUTPUT_TOKENS, d.maxOutputTokens, 1, 24_000),
+    dailyChatBudget: intVar(env.DAILY_CHAT_BUDGET, d.dailyChatBudget, 0, 10_000_000),
     rateLimitPeriodSeconds: intVar(env.RATE_LIMIT_PERIOD_SECONDS, d.rateLimitPeriodSeconds, 1, 86_400),
   };
 }
@@ -120,4 +125,34 @@ function expandIpv6(addr: string): number[] | null {
   const groups = [...head, ...Array(halves.length === 2 ? missing : 0).fill("0"), ...tail];
   if (groups.some((g) => !/^[0-9a-f]{1,4}$/.test(g))) return null;
   return groups.map((g) => parseInt(g, 16));
+}
+
+/** The UTC calendar day of `now`, as YYYY-MM-DD. */
+export function utcDay(now: Date): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/** Whole seconds from `now` until the next 00:00 UTC (1 to 86,400). */
+export function secondsUntilUtcMidnight(now: Date): number {
+  const next = Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1);
+  return Math.max(1, Math.ceil((next - now.getTime()) / 1000));
+}
+
+/**
+ * Counts one chat request against today's budget. Returns false, without
+ * counting, once `budget` requests have been accepted today. A single UPSERT,
+ * so concurrent requests cannot both take the last slot.
+ */
+export async function consumeDailyBudget(db: D1Database, budget: number, now: Date): Promise<boolean> {
+  if (budget <= 0) return false;
+  const row = await db
+    .prepare(
+      `INSERT INTO daily_usage (day, chat_requests) VALUES (?1, 1)
+       ON CONFLICT (day) DO UPDATE SET chat_requests = chat_requests + 1
+       WHERE chat_requests < ?2
+       RETURNING chat_requests`,
+    )
+    .bind(utcDay(now), budget)
+    .first<{ chat_requests: number }>();
+  return row !== null;
 }

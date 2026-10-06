@@ -4,9 +4,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   chatBodyByteLimit,
   clientKey,
+  consumeDailyBudget,
   DEFAULT_LIMITS,
   readLimits,
+  secondsUntilUtcMidnight,
   selectHistory,
+  utcDay,
 } from "../src/limits";
 import {
   aiInputs,
@@ -25,10 +28,26 @@ import {
 
 // From wrangler.toml: [[ratelimits]] simple.limit, and [vars].
 const PER_IP_LIMIT = 5;
+const BUDGET = 200;
 const MAX_MESSAGE_CHARS = 2000;
 const MAX_HISTORY_CHARS = 6000;
 
 beforeEach(clearD1);
+
+async function usedToday(): Promise<number> {
+  const row = await env.DB.prepare("SELECT chat_requests FROM daily_usage WHERE day = ?")
+    .bind(utcDay(new Date()))
+    .first<{ chat_requests: number }>();
+  return row?.chat_requests ?? 0;
+}
+
+async function setUsedToday(n: number) {
+  await env.DB.prepare(
+    "INSERT INTO daily_usage (day, chat_requests) VALUES (?, ?) ON CONFLICT (day) DO UPDATE SET chat_requests = excluded.chat_requests",
+  )
+    .bind(utcDay(new Date()), n)
+    .run();
+}
 
 /** Overrides vars for one session's Durable Object instance. */
 async function setSessionVars(sessionId: string, vars: Record<string, unknown>) {
@@ -63,6 +82,7 @@ describe("readLimits", () => {
       maxMessageChars: MAX_MESSAGE_CHARS,
       maxHistoryChars: MAX_HISTORY_CHARS,
       maxOutputTokens: 512,
+      dailyChatBudget: BUDGET,
       rateLimitPeriodSeconds: 60,
     });
   });
@@ -72,6 +92,7 @@ describe("readLimits", () => {
     expect(limits.maxMessageChars).toBe(DEFAULT_LIMITS.maxMessageChars);
     expect(limits.maxHistoryChars).toBe(DEFAULT_LIMITS.maxHistoryChars);
     expect(limits.maxOutputTokens).toBe(DEFAULT_LIMITS.maxOutputTokens);
+    expect(limits.dailyChatBudget).toBe(DEFAULT_LIMITS.dailyChatBudget);
     expect(limits.rateLimitPeriodSeconds).toBe(DEFAULT_LIMITS.rateLimitPeriodSeconds);
   });
 
@@ -79,13 +100,19 @@ describe("readLimits", () => {
     const limits = readLimits({
       MAX_MESSAGE_CHARS: "500",
       MAX_HISTORY_CHARS: "lots",
-      MAX_OUTPUT_TOKENS: 1.5,
+      MAX_OUTPUT_TOKENS: 0,
+      DAILY_CHAT_BUDGET: 1.5,
       RATE_LIMIT_PERIOD_SECONDS: "",
     });
     expect(limits.maxMessageChars).toBe(500);
     expect(limits.maxHistoryChars).toBe(DEFAULT_LIMITS.maxHistoryChars);
     expect(limits.maxOutputTokens).toBe(DEFAULT_LIMITS.maxOutputTokens);
+    expect(limits.dailyChatBudget).toBe(DEFAULT_LIMITS.dailyChatBudget);
     expect(limits.rateLimitPeriodSeconds).toBe(DEFAULT_LIMITS.rateLimitPeriodSeconds);
+  });
+
+  it("allows a daily budget of 0 (chat off)", () => {
+    expect(readLimits({ DAILY_CHAT_BUDGET: 0 }).dailyChatBudget).toBe(0);
   });
 
   it("sizes the chat body limit for a maximal message of 6-byte JSON escapes", () => {
@@ -159,6 +186,53 @@ describe("selectHistory", () => {
   });
 });
 
+describe("UTC day helpers", () => {
+  it("utcDay is the UTC calendar date", () => {
+    expect(utcDay(new Date("2026-10-05T23:59:59.999Z"))).toBe("2026-10-05");
+    expect(utcDay(new Date("2026-10-06T00:00:00Z"))).toBe("2026-10-06");
+  });
+
+  it.each([
+    ["2026-10-05T23:59:30Z", 30],
+    ["2026-10-05T23:59:59.500Z", 1],
+    ["2026-10-05T00:00:00Z", 86_400],
+    ["2026-10-05T12:00:00Z", 43_200],
+    ["2026-12-31T23:00:00Z", 3600],
+  ])("secondsUntilUtcMidnight(%s) is %i", (iso, seconds) => {
+    expect(secondsUntilUtcMidnight(new Date(iso))).toBe(seconds);
+  });
+});
+
+describe("consumeDailyBudget", () => {
+  const day = new Date("2026-10-05T12:00:00Z");
+
+  it("accepts up to the budget, then refuses without counting further", async () => {
+    expect(await consumeDailyBudget(env.DB, 2, day)).toBe(true);
+    expect(await consumeDailyBudget(env.DB, 2, day)).toBe(true);
+    expect(await consumeDailyBudget(env.DB, 2, day)).toBe(false);
+    expect(await consumeDailyBudget(env.DB, 2, day)).toBe(false);
+    const row = await env.DB.prepare("SELECT chat_requests FROM daily_usage WHERE day = '2026-10-05'").first();
+    expect(row).toEqual({ chat_requests: 2 });
+  });
+
+  it("starts again on the next UTC day", async () => {
+    expect(await consumeDailyBudget(env.DB, 1, day)).toBe(true);
+    expect(await consumeDailyBudget(env.DB, 1, day)).toBe(false);
+    expect(await consumeDailyBudget(env.DB, 1, new Date("2026-10-06T00:00:00Z"))).toBe(true);
+  });
+
+  it("lets exactly `budget` of many concurrent requests through", async () => {
+    const results = await Promise.all(Array.from({ length: 12 }, () => consumeDailyBudget(env.DB, 5, day)));
+    expect(results.filter(Boolean)).toHaveLength(5);
+  });
+
+  it("with a budget of 0 refuses everything and writes nothing", async () => {
+    expect(await consumeDailyBudget(env.DB, 0, day)).toBe(false);
+    const row = await env.DB.prepare("SELECT COUNT(*) AS n FROM daily_usage").first<{ n: number }>();
+    expect(row?.n).toBe(0);
+  });
+});
+
 describe("per-IP rate limit on POST /api/session/:id/chat", () => {
   it("returns 429 with Retry-After and a problem body, before the Durable Object runs", async () => {
     vi.spyOn(env.CHAT_RATE_LIMITER, "limit").mockResolvedValue({ success: false });
@@ -172,6 +246,7 @@ describe("per-IP rate limit on POST /api/session/:id/chat", () => {
 
     expect(ai).not.toHaveBeenCalled();
     expect((await getState("rl-429")).messages).toEqual([]);
+    expect(await usedToday()).toBe(0);
   });
 
   it("keys the limit on CF-Connecting-IP, and IPv6 on the /64", async () => {
@@ -212,6 +287,66 @@ describe("per-IP rate limit on POST /api/session/:id/chat", () => {
     expect((await api("/api/tickers")).status).toBe(200);
     expect((await api("/api/history/NQ")).status).toBe(200);
     expect((await postJson("/api/session/rl-only/chat", { message: "hi" })).status).toBe(429);
+  });
+});
+
+describe("daily chat budget", () => {
+  it("refuses chat with 429 once today's budget is used, until 00:00 UTC", async () => {
+    await setUsedToday(BUDGET);
+    const ai = mockAiStream(["unused"]);
+
+    const before = secondsUntilUtcMidnight(new Date());
+    const res = await postJson("/api/session/budget-full/chat", { message: "hi" });
+    const after = secondsUntilUtcMidnight(new Date());
+
+    const retryAfter = Number(res.headers.get("retry-after"));
+    expect(retryAfter).toBeLessThanOrEqual(before);
+    expect(retryAfter).toBeGreaterThanOrEqual(after);
+    const body = await expectProblem(res, 429, "Too Many Requests");
+    expect(body.detail).toBe(
+      `The demo has reached its limit of ${BUDGET} chat requests for today. It resets at 00:00 UTC.`,
+    );
+    expect(ai).not.toHaveBeenCalled();
+    expect(await usedToday()).toBe(BUDGET);
+  });
+
+  it("accepts the last request in the budget, then refuses the next", async () => {
+    await setUsedToday(BUDGET - 1);
+    mockAiStream(["ok"]);
+    const { res } = await chat("budget-last", "hi");
+    expect(res.status).toBe(200);
+    expect(await usedToday()).toBe(BUDGET);
+
+    expect((await postJson("/api/session/budget-last/chat", { message: "again" })).status).toBe(429);
+  });
+
+  it("counts each accepted chat request once", async () => {
+    mockAiStream(["ok"]);
+    await chat("budget-count", "one");
+    await chat("budget-count", "two");
+    expect(await usedToday()).toBe(2);
+  });
+
+  it("does not count rejected requests", async () => {
+    const ai = mockAiStream(["unused"]);
+    await postJson("/api/session/budget-free/chat", {});
+    await postJson("/api/session/budget-free/chat", { message: "x".repeat(MAX_MESSAGE_CHARS + 1) });
+    vi.spyOn(env.CHAT_RATE_LIMITER, "limit").mockResolvedValue({ success: false });
+    await postJson("/api/session/budget-free/chat", { message: "hi" });
+    expect(ai).not.toHaveBeenCalled();
+    expect(await usedToday()).toBe(0);
+  });
+
+  it("with DAILY_CHAT_BUDGET = 0, chat returns 503", async () => {
+    await setSessionVars("budget-off", { DAILY_CHAT_BUDGET: 0 });
+    const ai = mockAiStream(["unused"]);
+    const body = await expectProblem(
+      await postJson("/api/session/budget-off/chat", { message: "hi" }),
+      503,
+      "Service Unavailable",
+    );
+    expect(body.detail).toBe("Chat is turned off on this deployment.");
+    expect(ai).not.toHaveBeenCalled();
   });
 });
 

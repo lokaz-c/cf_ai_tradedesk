@@ -12,6 +12,7 @@ declare namespace Cloudflare {
     MAX_MESSAGE_CHARS: number;
     MAX_HISTORY_CHARS: number;
     MAX_OUTPUT_TOKENS: number;
+    DAILY_CHAT_BUDGET: number;
     RATE_LIMIT_PERIOD_SECONDS: number;
     // Test-only binding defined in vitest.config.ts.
     TEST_MIGRATIONS: import("cloudflare:test").D1Migration[];

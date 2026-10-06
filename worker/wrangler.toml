@@ -34,6 +34,9 @@ MAX_MESSAGE_CHARS = 2000
 MAX_HISTORY_CHARS = 6000
 # max_tokens for each reply.
 MAX_OUTPUT_TOKENS = 512
+# Chat requests accepted per UTC day across all users (counted in D1).
+# 0 turns chat off.
+DAILY_CHAT_BUDGET = 200
 # Retry-After on a per-IP 429. Keep it equal to ratelimits.simple.period.
 RATE_LIMIT_PERIOD_SECONDS = 60
 
