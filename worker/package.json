@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "npm run db:migrate && wrangler dev",
+    "dev:no-ai": "npm run db:migrate && wrangler dev --local",
     "db:migrate": "wrangler d1 migrations apply tradedesk-db --local",
     "deploy": "wrangler deploy",
     "test": "vitest run",
