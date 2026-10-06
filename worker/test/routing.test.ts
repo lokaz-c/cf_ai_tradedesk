@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { api, clearD1, getState, initSession } from "./helpers";
+import { api, clearD1, expectProblem, getState, initSession } from "./helpers";
 
 const CORS = {
   "access-control-allow-origin": "*",
@@ -55,13 +55,11 @@ describe("Worker routes backed by D1", () => {
 
 describe("unknown paths", () => {
   it.each(["/", "/api", "/api/unknown", "/api/history/", "/api/session/"])(
-    "GET %s returns a JSON 404 with CORS headers",
+    "GET %s returns a problem-details 404 with CORS headers",
     async (path) => {
       const res = await api(path);
-      expect(res.status).toBe(404);
-      expect(res.headers.get("content-type")).toBe("application/json");
       expectCors(res);
-      expect(await res.json()).toEqual({ error: "Not found" });
+      await expectProblem(res, 404, "Not Found");
     },
   );
 });
@@ -111,8 +109,7 @@ describe("session routes forwarded to the TradeSession Durable Object", () => {
     ["GET", "/unknown"],
   ])("%s /api/session/:id%s is rejected by the Durable Object with 404", async (method, sub) => {
     const res = await api(`/api/session/s-methods${sub}`, { method });
-    expect(res.status).toBe(404);
     expectCors(res);
-    expect(await res.text()).toBe("Not found");
+    await expectProblem(res, 404, "Not Found");
   });
 });

@@ -6,13 +6,13 @@ A chat assistant for trading research that runs entirely on Cloudflare. You pick
 
 Built in April 2026 as the take-home for Cloudflare's software engineering internship. The brief asks for an LLM, a coordination layer, a chat input and persistent memory. `PROMPTS.md` lists the prompts used while building it, as the brief requires.
 
-**Live demo:** https://cf-ai-tradedesk.pages.dev. It runs an earlier build: it does not have the two fixes listed under [Tests](#tests), and it has no rate limiting yet (see [Limitations](#limitations)).
+**Live demo:** https://cf-ai-tradedesk.pages.dev. It runs an earlier build: it does not have the fixes listed under [Tests](#tests) or the input validation and front-end security fixes, and it has no rate limiting yet (see [Limitations](#limitations)).
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    B["Browser<br>single-file Vite app"] -->|"POST /api/session/:id/chat"| W["Worker<br>router"]
+    B["Browser<br>Vite app"] -->|"POST /api/session/:id/chat"| W["Worker<br>router"]
     B -->|"GET /api/history/:ticker<br>GET /api/tickers"| W
     W -->|"idFromName(id)"| DO["TradeSession<br>Durable Object<br>one per session"]
     W -->|"history and rollup queries"| D1[("D1")]
@@ -39,11 +39,13 @@ cd worker && npm run db:migrate && npx wrangler d1 execute tradedesk-db --local 
 
 **Context for each request.** The Durable Object sends the model the system prompt; when the session has a ticker, a line naming it and the timeframe, plus the three most recent analyses for that ticker, read from D1 on every request with each answer cut to 300 characters; then the last 20 stored messages and the new message. Retrieval is by recency, not vector search.
 
-**Streaming and persistence.** Workers AI returns a server-sent event stream. The Durable Object splits it with `tee()`. One branch is the response body, so the browser renders tokens as they arrive. The other is read in the background (`waitUntil`) and reassembled into the full reply, which is appended to Durable Object storage and inserted into D1. Persistence never delays the first token.
+**Streaming and persistence.** Workers AI returns a server-sent event stream. The Durable Object splits it with `tee()`. One branch is the response body, so the browser renders tokens as they arrive. The other is read in the background (`waitUntil`) and reassembled into the full reply, which is appended to Durable Object storage and inserted into D1. Persistence never delays the first token. Both readers use the same parser (`shared/sse.ts`), which only parses complete lines and carries a partial line or a split UTF-8 character into the next network read.
+
+**Input and output handling.** Saved analyses are shared by every visitor, so the Worker validates what it stores: tickers must match `^[A-Z0-9]{1,10}([./-][A-Z0-9]{1,10})?$` after upper-casing (`GBP/USD`, `NQ`, `BRK.B`), timeframes must be one the page offers, and session IDs must be URL-safe. Anything else gets a 400 with an RFC 9457 problem body. The front end does not trust stored data either: values from the API are set with `textContent`, user messages are shown as plain text, and model replies are rendered with marked and sanitized with DOMPurify before they reach the DOM.
 
 ## Run it locally
 
-Requires Node 22 or later (CI uses Node 24 LTS).
+Requires Node 22 (22.22 or later) or Node 24 (24.15 or later), the versions jsdom 30 supports; the front-end tests use it. CI uses Node 24 LTS.
 
 ```bash
 git clone https://github.com/lokaz-c/cf_ai_tradedesk.git
@@ -58,18 +60,23 @@ npm run dev                          # open http://localhost:5173
 ## Tests
 
 ```bash
-npm test             # from the repo root, or from worker/
+npm test             # from the repo root: the Worker suite, then the front-end suite
 npm run typecheck
 ```
 
-There are 61 tests (count from `npm test`, the same command CI runs). They run inside workerd through `@cloudflare/vitest-plugin`, with the real Durable Object class and a local D1 database migrated from `migrations/`. Workers AI is replaced by a fake that returns a Workers AI style SSE stream, and remote bindings are disabled, so the tests never call a Cloudflare account.
+There are 206 tests: 138 for the Worker and 68 for the front end (counts from `npm test`; CI runs the same two suites).
+
+The Worker tests run inside workerd through `@cloudflare/vitest-plugin`, with the real Durable Object class and a local D1 database migrated from `migrations/`. Workers AI is replaced by a fake that returns a Workers AI style SSE stream, and remote bindings are disabled, so the tests never call a Cloudflare account.
 
 - `routing.test.ts`: status codes, method handling, 404s and CORS headers for every route.
 - `context.test.ts`: the 20-message window (at 0, 1, 19, 20, 21 and 30 stored messages), the three newest same-ticker analyses in order with answers cut to 300 characters, and that D1 is read on every request.
 - `d1.test.ts`: the migrated schema and indexes, the history route's limit and ordering, the rollup's counts and ordering, and session upserts with foreign keys enforced.
 - `chat.test.ts`: the SSE bytes the client receives, the first event arriving before the model finishes, and the tee'd copy written to Durable Object storage and D1.
+- `validation.test.ts`: accepted and rejected tickers, timeframes, session IDs and request bodies; rejected input stores nothing and never reaches the model; stored markup comes back as JSON with `nosniff`.
 
-Writing them found two bugs, both now fixed. The history route rejected URL-encoded tickers, so the sidebar got a 404 for the default instrument `GBP/USD`. And the background copy of the stream was parsed one network read at a time, so tokens split across reads were dropped from the stored reply.
+The front-end tests (`frontend/test/`) run in vitest with jsdom. They check that HTML payloads in a ticker, question, timestamp, user message or model reply (saved or streamed) render as inert text or sanitized markup while ordinary markdown survives, and that the on-screen reply is complete when the stream arrives in 1, 2, 3, 7, 64 or 4,096-byte reads.
+
+Writing the tests found three bugs, all now fixed. The history route rejected URL-encoded tickers, so the sidebar got a 404 for the default instrument `GBP/USD`. And both the background copy and the on-screen copy of the stream were parsed one network read at a time, so tokens split across reads were dropped.
 
 ## Routes
 
@@ -82,18 +89,22 @@ Writing them found two bugs, both now fixed. The history route rejected URL-enco
 | GET | `/api/history/:ticker` | Worker: the 20 most recent analyses for a ticker, from D1 |
 | GET | `/api/tickers` | Worker: tickers with their analysis count and latest timestamp, from D1 |
 
-All routes send `Access-Control-Allow-Origin: *`. Unknown routes return 404.
+All routes send `Access-Control-Allow-Origin: *` and `X-Content-Type-Options: nosniff`. Errors (400 for invalid input, 404 for unknown routes) use RFC 9457 problem details (`application/problem+json`).
 
 ## Repository layout
 
 ```
 worker/src/index.ts       Worker router and the TradeSession Durable Object
-worker/src/sse.ts         reassembles the reply text from the Workers AI SSE stream
-worker/test/              vitest suites and helpers
+worker/src/validation.ts  ticker, timeframe, session ID and request body validation
+worker/src/http.ts        problem-details responses and JSON body parsing
+worker/test/              Worker vitest suites and helpers
+shared/sse.ts             parses the Workers AI SSE stream; used by the Worker and the front end
 worker/wrangler.toml      bindings: AI, TRADE_SESSION (SQLite-backed Durable Object), DB (D1)
 migrations/0001_init.sql  sessions and analyses tables, indexes on ticker, session_id and created_at
-frontend/index.html       the chat page: streaming markdown render (marked), voice input (Web Speech API),
-                          ticker and timeframe picker, quick prompts, per-ticker history sidebar, Ctrl+K clears
+frontend/index.html       the chat page: markup and styles
+frontend/src/             page script: streaming markdown render (marked + DOMPurify), voice input
+                          (Web Speech API), ticker and timeframe picker, quick prompts, history sidebar
+frontend/test/            front-end vitest suites (jsdom)
 PROMPTS.md                the system prompt and the prompts used while building it
 ```
 
@@ -108,6 +119,4 @@ Do not deploy a public copy until rate limiting is in place (see Limitations). T
 - The model gets no market data. Any price level it states comes from its training data, not from a feed, so treat the output as a writing aid, not a signal.
 - Memory is by recency, not relevance. The three prepended analyses can come from the current session, so they can repeat what is already in the message window.
 - An exchange is stored only after the model finishes. If the stream fails partway, nothing is stored.
-- No input validation. A malformed body on `/init` or `/chat` returns a 500.
 - `created_at` has one-second resolution, so analyses saved in the same second have no defined order.
-- The front end parses each network read of the stream separately, so a token split across two reads can be missing on screen. The stored copy is complete.
