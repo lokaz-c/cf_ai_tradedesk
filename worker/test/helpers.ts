@@ -29,8 +29,21 @@ export async function expectProblem(res: Response, status: number, title: string
   return body;
 }
 
-/** Sends a request through the Worker's default export (the real router). */
+/** The origin the tests send by default; it is in ALLOWED_ORIGINS in wrangler.toml. */
+export const ORIGIN = "https://cf-ai-tradedesk.pages.dev";
+
+/**
+ * Sends a request through the Worker's default export (the real router), as
+ * the deployed page would: with an allowed Origin unless the caller sets one.
+ */
 export function api(path: string, init?: RequestInit): Promise<Response> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Origin")) headers.set("Origin", ORIGIN);
+  return rawApi(path, { ...init, headers });
+}
+
+/** Sends a request through the router exactly as given (no default headers). */
+export function rawApi(path: string, init?: RequestInit): Promise<Response> {
   return exports.default.fetch(new Request(`https://tradedesk.test${path}`, init));
 }
 

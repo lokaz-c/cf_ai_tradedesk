@@ -7,6 +7,7 @@ import {
   getState,
   initSession,
   mockAiStream,
+  ORIGIN,
   postJson,
   sseBody,
 } from "./helpers";
@@ -41,7 +42,7 @@ describe("POST /api/session/:id/chat", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("text/event-stream");
     expect(res.headers.get("cache-control")).toBe("no-cache");
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(res.headers.get("access-control-allow-origin")).toBe(ORIGIN);
     expect(body).toBe(sseBody(TOKENS));
   });
 

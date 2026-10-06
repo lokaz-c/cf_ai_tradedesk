@@ -4,11 +4,13 @@
  */
 
 import { collectStreamedText } from "../../shared/sse";
-import { badRequest, notFound, readJsonObject } from "./http";
+import { badRequest, corsHeaders, notFound, parseOrigins, problem, readJsonObject } from "./http";
 import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "./queries";
 import { isSessionId, parseChatBody, parseInitBody, parseTickerPath } from "./validation";
 
 export interface Env {
+  /** Comma-separated browser origins allowed to call the API. */
+  ALLOWED_ORIGINS?: string;
   AI: Ai;
   DB: D1Database;
   TRADE_SESSION: DurableObjectNamespace;
@@ -193,17 +195,12 @@ export class TradeSession {
 
 // ─── Worker Router ─────────────────────────────────────────────────────────────
 
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
 /** Headers on every response, including those from the Durable Object. */
-const API_HEADERS: Record<string, string> = {
-  ...CORS_HEADERS,
+const BASE_HEADERS: Record<string, string> = {
   // Responses are JSON or SSE; never let a browser sniff them as HTML.
   "X-Content-Type-Options": "nosniff",
+  // CORS headers depend on the request's Origin.
+  Vary: "Origin",
 };
 
 /** Copies a response with extra headers; the body (including a stream) passes through. */
@@ -269,6 +266,23 @@ async function route(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    return withHeaders(await route(request, env), API_HEADERS);
+    // Browsers send Origin on cross-origin requests. Only origins in
+    // ALLOWED_ORIGINS get CORS headers; a browser request from any other
+    // origin is refused before it reaches a route. Requests without Origin
+    // (curl, server-side code) are not affected: CORS is a browser control,
+    // not access control.
+    const origin = request.headers.get("Origin");
+    let headers = BASE_HEADERS;
+    if (origin !== null) {
+      const cors = corsHeaders(origin, parseOrigins(env.ALLOWED_ORIGINS));
+      if (!cors) {
+        return withHeaders(
+          problem(403, "Forbidden", "This origin is not allowed to call the API."),
+          BASE_HEADERS,
+        );
+      }
+      headers = { ...BASE_HEADERS, ...cors };
+    }
+    return withHeaders(await route(request, env), headers);
   },
 } satisfies ExportedHandler<Env>;
