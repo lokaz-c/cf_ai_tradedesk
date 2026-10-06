@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "dompurify": "^3.4.16",
+    "lightweight-charts": "^5.2.1",
     "marked": "^18.1.0"
   }
 }

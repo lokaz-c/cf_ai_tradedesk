@@ -80,3 +80,11 @@ simple = { limit = 5, period = 60 }
 name = "BACKTEST_RATE_LIMITER"
 namespace_id = "1002"
 simple = { limit = 2, period = 60 }
+
+# Per-IP limit on the chart panel's routes (GET /api/market/*), which call
+# market-data. They cost no model call; this keeps one client from using up
+# market-data's own rate limit for everyone.
+[[ratelimits]]
+name = "MARKET_RATE_LIMITER"
+namespace_id = "1003"
+simple = { limit = 30, period = 60 }

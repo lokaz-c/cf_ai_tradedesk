@@ -1,3 +1,5 @@
+import * as LightweightCharts from 'lightweight-charts';
+import { buildLegend, chartTickerFor, createChartPanel } from './chart.js';
 import { errorMessage, streamReplyInto } from './chat.js';
 import {
   buildAnalysisItem,
@@ -5,6 +7,7 @@ import {
   buildMessage,
   buildNotice,
   buildTickerHeader,
+  parseGrounding,
   setMarkdown,
   showError,
 } from './render.js';
@@ -35,6 +38,14 @@ const historyList = document.getElementById('historyList');
 const contextChip = document.getElementById('contextChip');
 const topTicker = document.getElementById('topTicker');
 const topTimeframe = document.getElementById('topTimeframe');
+const chartBox = document.getElementById('chartBox');
+const chartTicker = document.getElementById('chartTicker');
+const chartSource = document.getElementById('chartSource');
+const chartStatus = document.getElementById('chartStatus');
+const chartLegend = document.getElementById('chartLegend');
+const symbolSection = document.getElementById('symbolSection');
+const symbolChips = document.getElementById('symbolChips');
+const symbolList = document.getElementById('symbolList');
 
 const scrollToEnd = () => {
   messagesEl.scrollTop = messagesEl.scrollHeight;
@@ -67,6 +78,7 @@ async function startSession() {
   topTimeframe.textContent = timeframe;
   showToast(`Session started: ${ticker} ${timeframe}`);
   loadHistory();
+  loadChart(ticker);
   chatInput.placeholder = `Analyze ${ticker} on ${timeframe}...`;
 }
 
@@ -117,10 +129,129 @@ async function sendMessage(text) {
   }
 }
 
-/** Shows the grounding report (data sources, levels cited, unverified numbers) under an answer. */
+/**
+ * Shows the grounding report (data sources, levels cited, unverified numbers)
+ * under an answer, and draws the cited levels on the chart.
+ */
 function showGrounding(contentEl, report) {
   const panel = buildGroundingPanel(document, report);
   if (panel) contentEl.after(panel);
+  showCitationsOnChart(report).catch(() => {});
+}
+
+// ── Chart panel ────────────────────────────────────────────
+// Candles come from market-data through the Worker (/api/market/bars), so the
+// browser never holds an API key and CORS stays the Worker's allow-list.
+
+let chartPanel = null;
+let chartRequest = 0;
+
+/** Created on first use, so a deployment without market data never builds a canvas. */
+function chart() {
+  chartPanel ??= createChartPanel(chartBox, LightweightCharts);
+  return chartPanel;
+}
+
+function showLegend(lines) {
+  chartLegend.replaceChildren(
+    lines.length > 0 ? buildLegend(document, lines) : buildNotice(document, 'chart-empty', 'None yet.'),
+  );
+}
+
+function showChartSource(data) {
+  if (!data) {
+    chartSource.hidden = true;
+    return;
+  }
+  chartSource.hidden = false;
+  chartSource.className = `chart-source ${data.synthetic ? 'synthetic' : 'real'}`;
+  chartSource.textContent = data.synthetic ? 'SYNTHETIC DEMO DATA' : String(data.source ?? '').toUpperCase();
+  chartSource.title = String(data.sourceLabel ?? '');
+}
+
+/** Loads a year of daily bars for `symbol`. Resolves true when the chart shows it. */
+async function loadChart(symbol) {
+  const request = ++chartRequest;
+  chartTicker.textContent = symbol;
+  chartStatus.textContent = 'Loading daily bars...';
+  showLegend([]);
+  let res;
+  try {
+    res = await fetch(`${WORKER_URL}/api/market/bars/${encodeURIComponent(symbol)}`);
+  } catch {
+    if (request === chartRequest) chartStatus.textContent = 'Could not connect to the Worker.';
+    return false;
+  }
+  if (request !== chartRequest) return false;
+  if (!res.ok) {
+    chartPanel?.clear();
+    showChartSource(null);
+    chartStatus.textContent = await errorMessage(res);
+    return false;
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    if (request === chartRequest) chartStatus.textContent = 'The Worker returned bars in an unexpected format.';
+    return false;
+  }
+  if (request !== chartRequest) return false;
+  chart().setBars(data.ticker, data.bars);
+  chartTicker.textContent = data.ticker;
+  showChartSource(data);
+  const note = timeframe === 'D' ? '' : ` market-data serves daily bars only, not ${timeframe}.`;
+  chartStatus.textContent = `Daily bars, ${data.from} to ${data.to}.${note}`;
+  return true;
+}
+
+/** Draws an answer's cited levels, loading the cited ticker first if another one is charted. */
+async function showCitationsOnChart(report) {
+  const parsed = parseGrounding(report);
+  if (!parsed) return;
+  const target = chartTickerFor(parsed.citations, chartPanel?.ticker ?? null);
+  if (!target) return;
+  if (chartPanel?.ticker !== target && !(await loadChart(target))) return;
+  showLegend(chart().showCitations(parsed.citations));
+}
+
+/** Lists market-data's symbols (synthetic S001... on the public demo) as one-click sessions. */
+async function loadSymbols() {
+  let res;
+  try {
+    res = await fetch(`${WORKER_URL}/api/market/symbols`);
+  } catch {
+    return;
+  }
+  if (!res.ok) {
+    if (res.status === 503) chartStatus.textContent = await errorMessage(res);
+    return;
+  }
+  let symbols;
+  try {
+    ({ symbols } = await res.json());
+  } catch {
+    return;
+  }
+  if (!Array.isArray(symbols) || symbols.length === 0) return;
+  symbolChips.replaceChildren();
+  symbolList.replaceChildren();
+  for (const s of symbols) {
+    const chip = document.createElement('button');
+    chip.className = 'symbol-chip';
+    chip.type = 'button';
+    chip.textContent = String(s.ticker);
+    chip.title = `${s.name ?? s.ticker} (${s.source})`;
+    chip.onclick = () => {
+      tickerInput.value = String(s.ticker);
+      startSession();
+    };
+    symbolChips.append(chip);
+    const option = document.createElement('option');
+    option.value = String(s.ticker);
+    symbolList.append(option);
+  }
+  symbolSection.hidden = false;
 }
 
 function addMessage(role, content, streaming = false) {
@@ -290,3 +421,4 @@ function showToast(msg) {
 // ── Init ───────────────────────────────────────────────────
 initVoice();
 loadHistory();
+loadSymbols();
