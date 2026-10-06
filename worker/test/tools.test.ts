@@ -71,9 +71,9 @@ describe("daysArg and readMaxToolRounds", () => {
     );
   });
 
-  it("reads MAX_TOOL_ROUNDS within 1-4, defaulting to 2", () => {
+  it("reads MAX_TOOL_ROUNDS within 1-4, defaulting to 1", () => {
     expect([readMaxToolRounds({}), readMaxToolRounds({ MAX_TOOL_ROUNDS: 3 }), readMaxToolRounds({ MAX_TOOL_ROUNDS: 0 })]).toEqual(
-      [2, 3, 2],
+      [1, 3, 1],
     );
   });
 });

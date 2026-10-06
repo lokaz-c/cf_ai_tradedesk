@@ -55,7 +55,7 @@ MARKET_DATA_DISPLAY_SOURCES = "synthetic"
 # Timeout for each market-data request, in milliseconds.
 MARKET_DATA_TIMEOUT_MS = 4000
 # Non-streamed tool rounds before the streamed answer (1-4).
-MAX_TOOL_ROUNDS = 2
+MAX_TOOL_ROUNDS = 1
 
 # Backtest tool: the quant backtester (github.com/lokaz-c/quant). Empty turns
 # the tool off. Set it to the API's base URL, e.g.

@@ -96,7 +96,7 @@ export interface Toolset {
   execute(call: ToolCall): Promise<ToolOutcome>;
 }
 
-export const DEFAULT_MAX_TOOL_ROUNDS = 2;
+export const DEFAULT_MAX_TOOL_ROUNDS = 1;
 /** A tool round only needs to emit tool calls; any text it writes is discarded. */
 export const TOOL_ROUND_MAX_TOKENS = 256;
 export const MAX_CALLS_PER_ROUND = 3;
