@@ -4,7 +4,7 @@
 
 A chat assistant for trading research that runs on Cloudflare. You pick an instrument and a timeframe, ask a question by typing or by voice, and Llama 3.3 70B on Workers AI streams back a structured answer: bias, key levels, a possible setup, and risk events to watch. You can also ask it to backtest a strategy. Each session remembers its conversation, and a new session on the same instrument starts with the most recent saved analyses for it.
 
-Price levels come from [market-data](https://github.com/lokaz-c/market-data), a separate service, not from the model's memory. The model fetches levels and recent bars through tool calls, the Worker checks every price-like number in the finished answer against what it fetched, and the page lists the levels the answer cited and flags any number that matches nothing. market-data's public endpoints serve synthetic demo data (Alpaca's terms forbid showing its data publicly without written consent), and answers and the page say so. Backtests run on [quant](https://github.com/lokaz-c/quant), my backtester, whose data is also synthetic; the answer summarises only the metrics quant returned, and the page shows them in a table.
+Price levels come from [market-data](https://github.com/lokaz-c/market-data), a separate service, not from the model's memory. The model fetches levels and recent bars through tool calls, the Worker checks every price-like number in the finished answer against what it fetched, and the page lists the levels the answer cited and flags any number that matches nothing. A chart beside the chat shows the instrument's daily candles and draws each cited level as a labelled price line. market-data's public endpoints serve synthetic demo data (Alpaca's terms forbid showing its data publicly without written consent), and answers and the page say so. Backtests run on [quant](https://github.com/lokaz-c/quant), my backtester, whose data is also synthetic; the answer summarises only the metrics quant returned, and the page shows them in a table.
 
 Built in April 2026 as the take-home for Cloudflare's software engineering internship. The brief asks for an LLM, a coordination layer, a chat input and persistent memory. `PROMPTS.md` lists the prompts used while building it, as the brief requires.
 
@@ -16,6 +16,8 @@ Built in April 2026 as the take-home for Cloudflare's software engineering inter
 flowchart LR
     B["Browser<br>Vite app"] -->|"POST /api/session/:id/chat"| W["Worker<br>router"]
     B -->|"GET /api/history/:ticker<br>GET /api/tickers"| W
+    B -->|"chart: GET /api/market/bars/:ticker<br>GET /api/market/symbols"| W
+    W -->|"GET /v1/bars, /v1/symbols"| MD
     W -->|"idFromName(id)"| DO["TradeSession<br>Durable Object<br>one per session"]
     W -->|"history and rollup queries"| D1[("D1")]
     W -.->|"per-IP limit"| RL["Rate Limiting<br>binding"]
@@ -86,6 +88,8 @@ The background copy runs the same check on the same text, so the saved answer an
 
 Each backtest runs a full simulation on quant's server on top of the model calls, so backtests are limited more tightly than chat: one per question; 2 per 60 seconds per IP, with a second Rate Limiting binding (`BACKTEST_RATE_LIMITER`) checked when the model calls the tool, keyed on the `CF-Connecting-IP` the router forwards to the Durable Object; and `DAILY_BACKTEST_BUDGET` (20) per UTC day, counted in `daily_usage.backtests` (migration 0005) with the same single-UPSERT pattern as the chat budget. A refused backtest becomes a `NOT RUN` block with the reason, so the answer says why. A backtest makes no extra model call, so it does not change the cost bound below.
 
+**Chart panel.** The panel beside the chat uses [TradingView Lightweight Charts](https://github.com/tradingview/lightweight-charts) 5.2.1 (`createChart`, `addSeries(CandlestickSeries)`, `createPriceLine`). Its candles come from `GET /api/market/bars/:ticker`, a Worker route that calls market-data's `/v1/bars`, so the browser never holds the API key, CORS stays the Worker's allow-list, and the display-source check applies to the chart as it does to the model. The route has its own per-IP limit (`MARKET_RATE_LIMITER`, 30 per 60 s), so one client cannot use up market-data's per-IP limit, which every request from the Worker shares. After each answer, the page takes the citations from the report and draws a price line for each level or bar value cited for the charted ticker (backtest numbers are not drawn), labelled with its name (`R1`, `P`, `20D high`) and listed under the chart. If the answer cited another ticker, the panel loads that ticker first. Reopening a saved analysis draws its stored citations too. The panel shows a `SYNTHETIC DEMO DATA` badge for synthetic bars and says when the session's timeframe is not daily. `GET /api/market/symbols` lists the symbols with data as one-click sessions (S001 to S050 on market-data's demo seed). Everything the panel writes to the DOM is set with `textContent`; prices drawn on the canvas are numbers from the report. The library's licence asks for its NOTICE text and a link to tradingview.com on the page: the chart keeps the library's attribution logo (`attributionLogo: true`, which links there), and the panel's footer carries the notice and the link.
+
 **When market-data fails.** A timeout (`MARKET_DATA_TIMEOUT_MS`, 4 s), a connection error, a 5xx, a 429, a body in the wrong shape, or a 404 each become a block that tells the model what happened and what to write, and a data note in the answer. Tickers market-data cannot serve are refused without a request: its format is a letter, then letters, digits or a dot, so `GBP/USD` and `BTC-USD` get "no data".
 
 **Synthetic data and Alpaca's terms.** market-data serves only synthetic data on its public endpoints by default (`PUBLIC_DATA_SOURCES=synthetic`), because Alpaca's terms forbid public display of its data without written consent. Synthetic data is labelled at every step: the block says `SYNTHETIC DEMO DATA: generated prices, not real market prices`, the system prompt tells the model to say so and never to call the values real prices, the Worker's data note says so in every answer that used it, and the page shows a `SYNTHETIC DEMO DATA` badge. `MARKET_DATA_DISPLAY_SOURCES` (default `synthetic`) lists the `source` values TradeDesk may show. Data from any other source is refused, even when `MARKET_DATA_API_KEY` lets the Worker read it.
@@ -127,7 +131,7 @@ npm test             # from the repo root: the Worker suite, then the front-end 
 npm run typecheck
 ```
 
-There are 420 tests: 319 for the Worker and 101 for the front end (counts from `npm test`; CI runs the same two suites).
+There are 455 tests: 334 for the Worker and 121 for the front end (counts from `npm test`; CI runs the same two suites).
 
 The Worker tests run inside workerd through `@cloudflare/vitest-plugin`, with the real Durable Object class and a local D1 database migrated from `migrations/`. Workers AI is replaced by a fake that returns a Workers AI style SSE stream (and, for tool rounds, `tool_calls` objects), market-data by a stubbed `fetch`, and remote bindings are disabled, so the tests never call a Cloudflare account or another service.
 
@@ -138,12 +142,13 @@ The Worker tests run inside workerd through `@cloudflare/vitest-plugin`, with th
 - `validation.test.ts`: accepted and rejected tickers, timeframes, session IDs and request bodies; rejected input stores nothing and never reaches the model; stored markup comes back as JSON with `nosniff`.
 - `marketdata.test.ts`: the market-data client against a stubbed `fetch`: config parsing, ticker format checked before any request, `X-API-Key` sent only when set, numbers sent as strings, 400/401/404/429/5xx, a timeout, a connection failure, malformed bodies, the display-source check, and bar pagination.
 - `grounding-chat.test.ts`: the tool loop end to end through the router and the Durable Object, with Workers AI and market-data mocked: non-streamed rounds with tools, then a streamed call with the data block and no tools; the round and call caps; repeated calls; a JSON tool call written as text; unknown tools; a failed round; market-data slow, down, 500 or 404, a ticker it cannot serve, and a source it may not display; the data notes, the report event, the stored copy and report; an unprovided price flagged, logged and stored; and grounding off.
+- `market-routes.test.ts`: the chart's routes: bars with the source labelled and cache headers, the API key sent from the Worker, 503 when market data is not connected, a ticker market-data cannot serve, 404/timeout/connection failure/500/429 from market-data mapped to 404/504/502/502/503, a source the deployment may not display, the per-IP limit, and the symbol list filtered to displayable sources.
 - `quant.test.ts`: the quant client: strategy and profile names, argument checks, the exact request body, dates from `/api/data`, `Infinity` in the response, the synthetic flag, a 400 passed through, a 500, a timeout, a connection failure and malformed bodies.
 - `backtest-chat.test.ts`: the backtest tool through the router and the Durable Object: the data block and the summary's numbers checked against the metrics, an invented metric flagged, invalid arguments refused before anything is counted, one backtest per question, the per-IP limit with the local binding (third request from one address refused) and mocked, the daily budget and budget 0, and a quant timeout.
 - `grounding.test.ts` and `tools.test.ts`: number extraction (dates, ratios, list markers, periods, indicator lengths, tickers, years, signs, percentages), the tolerance, citations and unverified numbers, tool-call parsing, argument clamping, bar facts and the data notes.
 - `limits.test.ts`: the per-IP limit, mocked (429 body and `Retry-After`, nothing reaches the Durable Object, the key for IPv4, IPv6 and IPv4-mapped addresses) and with the local rate-limit binding (one address blocked, another not); the daily budget (the last slot, exhaustion until 00:00 UTC, concurrent requests, rejected requests not counted, 0 turns chat off); the message, body, history and `max_tokens` caps; and parsing of the vars.
 
-The front-end tests (`frontend/test/`) run in vitest with jsdom. They check that HTML payloads in a ticker, question, timestamp, user message, model reply (saved or streamed) or grounding report render as inert text or sanitized markup while ordinary markdown survives, that the on-screen reply is complete when the stream arrives in 1, 2, 3, 7, 64 or 4,096-byte reads, that the report event reaches the page and not the text, and that the report panel labels synthetic data, lists cited and unverified numbers, and shows a backtest's metrics as returned.
+The front-end tests (`frontend/test/`) run in vitest with jsdom. They check that HTML payloads in a ticker, question, timestamp, user message, model reply (saved or streamed) or grounding report render as inert text or sanitized markup while ordinary markdown survives, that the on-screen reply is complete when the stream arrives in 1, 2, 3, 7, 64 or 4,096-byte reads, that the report event reaches the page and not the text, and that the report panel labels synthetic data, lists cited and unverified numbers, and shows a backtest's metrics as returned. `chart.test.js` checks the chart logic with a stand-in for the library (jsdom has no canvas): candles from bars, which citations become price lines (levels and bar values for the charted ticker only, one per label and price) with their labels, colours and line styles, that each answer replaces the previous lines, which ticker to chart for a set of citations, and that legend labels are set as text.
 
 Outbound requests to market-data and quant are stubbed with `vi.spyOn(globalThis, "fetch")` (`worker/test/fetch-mock.ts`), which works because the Worker, its Durable Objects and the tests share one isolate. The Workers Vitest docs suggest `@msw/cloudflare`; with MSW 3 in this pool, every aborted request (the timeout tests) left an unhandled rejection inside the interceptor and failed the run.
 
@@ -159,8 +164,10 @@ Writing the tests found three bugs, all now fixed. The history route rejected UR
 | DELETE | `/api/session/:id/clear` | Durable Object: clear the message history (ticker, timeframe and saved analyses stay) |
 | GET | `/api/history/:ticker` | Worker: the 20 most recent analyses for a ticker, with their grounding reports, from D1 |
 | GET | `/api/tickers` | Worker: tickers with their analysis count and latest timestamp, from D1 |
+| GET | `/api/market/bars/:ticker` | Worker: daily bars for the year before the latest bar, from market-data, with the source labelled. Rate-limited per IP |
+| GET | `/api/market/symbols` | Worker: market-data's symbols, limited to the sources the deployment may show. Rate-limited per IP |
 
-Requests from an origin in `ALLOWED_ORIGINS` get CORS headers for that origin; requests from other origins get 403. All responses send `X-Content-Type-Options: nosniff`. Errors use RFC 9457 problem details (`application/problem+json`): 400 for invalid input, 403 for a disallowed origin, 404 for unknown routes, 413 for an oversized message, 429 with `Retry-After` for the per-IP limit or the daily budget, and 503 when chat is turned off.
+Requests from an origin in `ALLOWED_ORIGINS` get CORS headers for that origin; requests from other origins get 403. All responses send `X-Content-Type-Options: nosniff`. Errors use RFC 9457 problem details (`application/problem+json`): 400 for invalid input, 403 for a disallowed origin, 404 for unknown routes or a ticker with no market data, 413 for an oversized message, 429 with `Retry-After` for a per-IP limit or the daily budget, 502 or 504 when market-data fails or times out, and 503 when chat is turned off or market data is not connected.
 
 ## Repository layout
 
@@ -174,6 +181,7 @@ worker/src/marketdata.ts  market-data client: levels and bars, timeouts, errors,
 worker/src/tools.ts       tool definitions, tool rounds, data blocks, data notes
 worker/src/grounding.ts   the post-check: number extraction and matching against provided values
 worker/src/stream.ts      re-emits the model's stream with the data notes and the report event
+worker/src/market-routes.ts  /api/market/bars and /api/market/symbols for the chart panel
 worker/src/quant.ts       quant client: names, argument checks, POST /api/backtest/, Infinity-tolerant JSON
 worker/src/backtest.ts    run_backtest tool: limits, data block, facts for the post-check
 worker/scripts/           explain-query-plan.mjs (npm run db:explain)
@@ -184,8 +192,8 @@ migrations/               0001 tables and indexes, 0002 (ticker, created_at) ind
                           0004 analyses.grounding, 0005 daily_usage.backtests
 frontend/index.html       the chat page: markup and styles
 frontend/src/             page script: streaming markdown render (marked + DOMPurify), grounding report,
-                          voice input (Web Speech API), ticker and timeframe picker, quick prompts,
-                          history sidebar
+                          chart panel (chart.js, Lightweight Charts), voice input (Web Speech API),
+                          ticker and timeframe picker, quick prompts, history sidebar
 frontend/test/            front-end vitest suites (jsdom)
 PROMPTS.md                the system prompt and the prompts used while building it
 ```
@@ -201,6 +209,7 @@ The Worker's bindings and settings are all in `worker/wrangler.toml`:
 | `DB` | D1 binding | | analyses, sessions, daily usage |
 | `CHAT_RATE_LIMITER` | Rate Limiting binding | 5 per 60 s | per-IP chat limit; `namespace_id` is any integer not used by another rate limiter on the account (period must be 10 or 60) |
 | `BACKTEST_RATE_LIMITER` | Rate Limiting binding | 2 per 60 s | per-IP backtest limit (`namespace_id` 1002) |
+| `MARKET_RATE_LIMITER` | Rate Limiting binding | 30 per 60 s | per-IP limit on `/api/market/*` (`namespace_id` 1003) |
 | `ALLOWED_ORIGINS` | var | `https://cf-ai-tradedesk.pages.dev,http://localhost:5173` | browser origins that may call the API |
 | `MAX_MESSAGE_CHARS` | var | 2000 | longest message accepted |
 | `MAX_HISTORY_CHARS` | var | 6000 | stored conversation sent per request |
@@ -232,7 +241,7 @@ The rate limiter needs no resource created in advance. To deploy to your own acc
 - No authentication. Session IDs are generated in the browser, and anyone with an ID can read that session. Saved analyses are global: every visitor's sidebar shows every saved analysis.
 - Neither TradeDesk with grounding nor market-data is deployed yet; both wait for Lorenzo to deploy them. Until `MARKET_DATA_URL` is set, the model has no price data and is told to say "no data".
 - The public market data is synthetic. Alpaca's terms forbid public display of its data without written consent, so market-data's public endpoints and `MARKET_DATA_DISPLAY_SOURCES` default to synthetic symbols (S001 to S050 in market-data's demo seed). The levels are computed correctly from generated prices; they are not real prices.
-- market-data serves daily bars only, so levels and bars are daily whatever timeframe the session uses, and it covers US-equity-style tickers: forex pairs, futures and crypto get "no data".
+- market-data serves daily bars only, so levels, bars and the chart are daily whatever timeframe the session uses, and it covers US-equity-style tickers: forex pairs, futures and crypto get "no data" and an empty chart.
 - The post-check is a heuristic. It flags numbers derived from the data (a midpoint, a distance, a stop placed below a level) as unverified, it can miss a price written as a small whole number under 100 or as a year-like number, and it checks percentages only against backtest metrics. It reports; it does not block or rewrite an answer. Whether the model calls a tool at all is up to the model; when it does not, the data block says no data was retrieved and the check flags any price it writes.
 - quant is not deployed either, and its data is synthetic (a seeded regime-switching generator; its symbol names, such as AAPL, are labels only). Its symbols are not market-data's: a backtest on AAPL and levels for S001 come from two unrelated synthetic datasets.
 - quant's API runs a backtest inside the HTTP request and has no job to poll, so a backtest longer than `QUANT_TIMEOUT_MS` is reported as timed out even if quant finishes it later and stores the run.
