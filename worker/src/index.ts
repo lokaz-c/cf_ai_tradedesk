@@ -4,14 +4,48 @@
  */
 
 import { collectStreamedText } from "../../shared/sse";
-import { badRequest, notFound, readJsonObject } from "./http";
-import { isSessionId, parseChatBody, parseInitBody, parseTickerPath } from "./validation";
+import {
+  badRequest,
+  BodyTooLargeError,
+  contentTooLarge,
+  corsHeaders,
+  notFound,
+  parseOrigins,
+  problem,
+  readJsonObject,
+} from "./http";
+import {
+  chatBodyByteLimit,
+  clientKey,
+  consumeDailyBudget,
+  readLimits,
+  secondsUntilUtcMidnight,
+  selectHistory,
+  type LimitVars,
+} from "./limits";
+import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "./queries";
+import {
+  INVALID_TICKER,
+  isSessionId,
+  parseChatBody,
+  parseInitBody,
+  parseTickerPath,
+} from "./validation";
 
-export interface Env {
+export interface Env extends LimitVars {
+  /** Comma-separated browser origins allowed to call the API. */
+  ALLOWED_ORIGINS?: string;
   AI: Ai;
   DB: D1Database;
   TRADE_SESSION: DurableObjectNamespace;
+  /** Per-IP limit on chat requests ([[ratelimits]] in wrangler.toml). */
+  CHAT_RATE_LIMITER: RateLimit;
 }
+
+const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
+/** Saved questions and answers added to the context are cut to this many characters. */
+const SAVED_TEXT_CHARS = 300;
 
 interface Message {
   role: "user" | "assistant" | "system";
@@ -89,7 +123,14 @@ export class TradeSession {
 
     // POST /init — initialize or update session context
     if (request.method === "POST" && url.pathname === "/init") {
-      const parsed = parseInitBody(await readJsonObject(request));
+      let body: Record<string, unknown> | null;
+      try {
+        body = await readJsonObject(request);
+      } catch (e) {
+        if (e instanceof BodyTooLargeError) return contentTooLarge("The request body is too large.");
+        throw e;
+      }
+      const parsed = parseInitBody(body);
       if (!parsed.ok) return badRequest(parsed.detail);
       const session = await this.getSession();
       session.ticker = parsed.value.ticker;
@@ -106,28 +147,54 @@ export class TradeSession {
       return Response.json({ ok: true, session });
     }
 
-    // POST /chat — send message, get streaming AI response
+    // POST /chat — send message, get streaming AI response.
+    // The router has already applied the per-IP rate limit.
     if (request.method === "POST" && url.pathname === "/chat") {
-      const parsed = parseChatBody(await readJsonObject(request));
-      if (!parsed.ok) return badRequest(parsed.detail);
+      const limits = readLimits(this.env);
+      let raw: Record<string, unknown> | null;
+      try {
+        raw = await readJsonObject(request, chatBodyByteLimit(limits));
+      } catch (e) {
+        if (e instanceof BodyTooLargeError) {
+          return contentTooLarge(`Messages are limited to ${limits.maxMessageChars} characters.`);
+        }
+        throw e;
+      }
+      const parsed = parseChatBody(raw, limits.maxMessageChars);
+      if (!parsed.ok) {
+        return parsed.status === 413 ? contentTooLarge(parsed.detail) : badRequest(parsed.detail);
+      }
       const body = parsed.value;
+
+      // Only valid requests count against the daily budget.
+      if (limits.dailyChatBudget === 0) {
+        return problem(503, "Service Unavailable", "Chat is turned off on this deployment.");
+      }
+      const now = new Date();
+      if (!(await consumeDailyBudget(this.env.DB, limits.dailyChatBudget, now))) {
+        const retryAfter = secondsUntilUtcMidnight(now);
+        return problem(
+          429,
+          "Too Many Requests",
+          `The demo has reached its limit of ${limits.dailyChatBudget} chat requests for today. It resets at 00:00 UTC.`,
+          { "Retry-After": String(retryAfter) },
+        );
+      }
+
       const session = await this.getSession();
 
-      // Build message history (keep last 20 for context window)
-      const recentMessages = session.messages.slice(-20);
+      // The newest stored messages: at most 20, and at most maxHistoryChars characters.
+      const recentMessages = selectHistory(session.messages, limits.maxHistoryChars);
 
       // Fetch relevant past analyses from D1 for RAG
       let ragContext = "";
       if (session.ticker) {
-        const pastAnalyses = await this.env.DB.prepare(
-          `SELECT user_query, ai_response, created_at FROM analyses
-           WHERE ticker = ? ORDER BY created_at DESC LIMIT 3`
-        ).bind(session.ticker).all<{ user_query: string; ai_response: string; created_at: number }>();
+        const pastAnalyses = await this.env.DB.prepare(CONTEXT_SQL).bind(session.ticker).all<{ user_query: string; ai_response: string; created_at: number }>();
 
         if (pastAnalyses.results.length > 0) {
           ragContext = "\n\n[PAST ANALYSES FOR " + session.ticker + "]\n" +
             pastAnalyses.results.map(a =>
-              `Q: ${a.user_query}\nA: ${a.ai_response.slice(0, 300)}...`
+              `Q: ${a.user_query.slice(0, SAVED_TEXT_CHARS)}\nA: ${a.ai_response.slice(0, SAVED_TEXT_CHARS)}...`
             ).join("\n---\n");
         }
       }
@@ -142,13 +209,13 @@ export class TradeSession {
       ];
 
       // Stream response from Workers AI
-      const aiResponse = await this.env.AI.run("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+      const aiResponse = await this.env.AI.run(MODEL, {
         messages: [
           { role: "system", content: systemWithContext },
           ...messages
         ],
         stream: true,
-        max_tokens: 1024,
+        max_tokens: limits.maxOutputTokens,
       }) as ReadableStream;
 
       // Collect full response for storage (tee the stream)
@@ -195,17 +262,12 @@ export class TradeSession {
 
 // ─── Worker Router ─────────────────────────────────────────────────────────────
 
-const CORS_HEADERS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-
 /** Headers on every response, including those from the Durable Object. */
-const API_HEADERS: Record<string, string> = {
-  ...CORS_HEADERS,
+const BASE_HEADERS: Record<string, string> = {
   // Responses are JSON or SSE; never let a browser sniff them as HTML.
   "X-Content-Type-Options": "nosniff",
+  // CORS headers depend on the request's Origin.
+  Vary: "Origin",
 };
 
 /** Copies a response with extra headers; the body (including a stream) passes through. */
@@ -231,6 +293,22 @@ async function route(request: Request, env: Env): Promise<Response> {
       return badRequest("Invalid session ID: use 1-64 letters, digits, '-' or '_'.");
     }
 
+    // Per-IP limit on the route that calls the model, checked before the
+    // Durable Object is involved. CF-Connecting-IP is set by Cloudflare.
+    if (request.method === "POST" && subPath === "/chat") {
+      const key = clientKey(request.headers.get("CF-Connecting-IP"));
+      const { success } = await env.CHAT_RATE_LIMITER.limit({ key });
+      if (!success) {
+        const period = readLimits(env).rateLimitPeriodSeconds;
+        return problem(
+          429,
+          "Too Many Requests",
+          `Too many chat requests from your network. Try again in ${period} seconds.`,
+          { "Retry-After": String(period) },
+        );
+      }
+    }
+
     const doId = env.TRADE_SESSION.idFromName(sessionId);
     const stub = env.TRADE_SESSION.get(doId);
 
@@ -250,25 +328,15 @@ async function route(request: Request, env: Env): Promise<Response> {
   const historyMatch = url.pathname.match(/^\/api\/history\/(.+)$/);
   if (historyMatch && request.method === "GET") {
     const ticker = parseTickerPath(historyMatch[1]);
-    if (!ticker) {
-      return badRequest(
-        "Invalid ticker: use 1-10 letters or digits, optionally followed by '/', '.' or '-' and 1-10 more (for example GBP/USD or NQ).",
-      );
-    }
-    const results = await env.DB.prepare(
-      `SELECT id, session_id, ticker, timeframe, user_query, ai_response, created_at
-       FROM analyses WHERE ticker = ? ORDER BY created_at DESC LIMIT 20`
-    ).bind(ticker).all();
+    if (!ticker) return badRequest(INVALID_TICKER);
+    const results = await env.DB.prepare(HISTORY_SQL).bind(ticker).all();
 
     return Response.json(results);
   }
 
   // Route: GET /api/tickers — get all tickers with saved analyses
   if (url.pathname === "/api/tickers" && request.method === "GET") {
-    const results = await env.DB.prepare(
-      `SELECT ticker, COUNT(*) as count, MAX(created_at) as last_analysis
-       FROM analyses GROUP BY ticker ORDER BY last_analysis DESC`
-    ).all();
+    const results = await env.DB.prepare(TICKERS_SQL).all();
     return Response.json(results);
   }
 
@@ -277,6 +345,23 @@ async function route(request: Request, env: Env): Promise<Response> {
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    return withHeaders(await route(request, env), API_HEADERS);
+    // Browsers send Origin on cross-origin requests. Only origins in
+    // ALLOWED_ORIGINS get CORS headers; a browser request from any other
+    // origin is refused before it reaches a route. Requests without Origin
+    // (curl, server-side code) are not affected: CORS is a browser control,
+    // not access control.
+    const origin = request.headers.get("Origin");
+    let headers = BASE_HEADERS;
+    if (origin !== null) {
+      const cors = corsHeaders(origin, parseOrigins(env.ALLOWED_ORIGINS));
+      if (!cors) {
+        return withHeaders(
+          problem(403, "Forbidden", "This origin is not allowed to call the API."),
+          BASE_HEADERS,
+        );
+      }
+      headers = { ...BASE_HEADERS, ...cors };
+    }
+    return withHeaders(await route(request, env), headers);
   },
 } satisfies ExportedHandler<Env>;
