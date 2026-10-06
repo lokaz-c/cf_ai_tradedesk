@@ -64,4 +64,22 @@ describe('errorMessage', () => {
     expect(await errorMessage(new Response('oops', { status: 502 }))).toBe('Request failed (HTTP 502).');
     expect(await errorMessage(new Response('{}', { status: 500 }))).toBe('Request failed (HTTP 500).');
   });
+
+  it('says how long to wait on a 429 or 503 with Retry-After and no detail', async () => {
+    expect(await errorMessage(new Response('', { status: 429, headers: { 'Retry-After': '30' } }))).toBe('Busy, retry in 30 s.');
+    expect(await errorMessage(new Response('{}', { status: 503, headers: { 'Retry-After': ' 7 ' } }))).toBe('Busy, retry in 7 s.');
+  });
+
+  it('prefers the detail, and gives no wait it was not sent', async () => {
+    const detailed = new Response(JSON.stringify({ detail: 'market-data is busy (rate limit reached); retry in 12 s.' }), {
+      status: 503,
+      headers: { 'Retry-After': '12' },
+    });
+    expect(await errorMessage(detailed)).toBe('market-data is busy (rate limit reached); retry in 12 s.');
+    expect(await errorMessage(new Response('', { status: 503 }))).toBe('Request failed (HTTP 503).');
+    expect(await errorMessage(new Response('', { status: 503, headers: { 'Retry-After': 'soon' } }))).toBe(
+      'Request failed (HTTP 503).',
+    );
+    expect(await errorMessage(new Response('', { status: 500, headers: { 'Retry-After': '5' } }))).toBe('Request failed (HTTP 500).');
+  });
 });

@@ -150,6 +150,13 @@ export function parseGrounding(value) {
     metrics: Object.fromEntries(
       BACKTEST_METRICS.map(({ key }) => [key, isObject(b.metrics) && finite(b.metrics[key]) ? b.metrics[key] : null]),
     ),
+    // quant's reason for each null metric; older saved analyses have none.
+    undefinedMetrics: Object.fromEntries(
+      BACKTEST_METRICS.flatMap(({ key }) =>
+        isObject(b.undefinedMetrics) && text(b.undefinedMetrics[key]) ? [[key, text(b.undefinedMetrics[key])]] : [],
+      ),
+    ),
+    periodNote: text(b.periodNote),
   }));
   if (data.length === 0 && citations.length === 0 && unverified.length === 0 && backtests.length === 0) return null;
   return { data, citations, unverified, backtests };
@@ -172,9 +179,13 @@ export const BACKTEST_METRICS = [
   { key: 'max_consecutive_losses', label: 'Max consecutive losses', unit: 'count' },
 ];
 
-/** A metric as quant returned it, rounded for display; null (Infinity or NaN in quant's response) is "not finite". */
-export function formatMetric(value, unit) {
-  if (!finite(value)) return 'not finite';
+/**
+ * A metric as quant returned it, rounded for display. quant sends null for a
+ * metric it cannot compute for the run, with the reason; that shows as
+ * "n/a (reason)", or "n/a" when no reason was given.
+ */
+export function formatMetric(value, unit, reason = '') {
+  if (!finite(value)) return reason ? `n/a (${reason})` : 'n/a';
   switch (unit) {
     case 'percent':
       return `${value.toFixed(2)}%`;
@@ -187,7 +198,13 @@ export function formatMetric(value, unit) {
   }
 }
 
-const UNAVAILABLE = new Set(['timeout', 'unavailable', 'rate_limited', 'bad_response']);
+const UNAVAILABLE = new Set(['timeout', 'unavailable', 'bad_response']);
+
+/** market-data's badge for a failed call; rate_limited means it asked the Worker to wait (the detail says how long). */
+function failureBadge(status, fallback) {
+  if (status === 'rate_limited') return 'BUSY';
+  return UNAVAILABLE.has(status) ? 'UNAVAILABLE' : fallback;
+}
 
 /** One line per ticker and outcome: the data source, or why there was no data. */
 function sourceLine(doc, d) {
@@ -224,7 +241,7 @@ function sourceLine(doc, d) {
   const line = element(doc, 'div', 'grounding-source error');
   line.append(
     element(doc, 'span', 'grounding-ticker', d.ticker),
-    element(doc, 'span', 'grounding-badge', UNAVAILABLE.has(d.status) ? 'UNAVAILABLE' : 'NO DATA'),
+    element(doc, 'span', 'grounding-badge', failureBadge(d.status, 'NO DATA')),
     element(doc, 'span', 'grounding-detail', d.detail),
   );
   return line;
@@ -303,10 +320,13 @@ export function buildBacktestTable(doc, b) {
   const tbody = element(doc, 'tbody');
   for (const { key, label, unit } of BACKTEST_METRICS) {
     const row = element(doc, 'tr');
-    row.append(element(doc, 'th', '', label), element(doc, 'td', '', formatMetric(b.metrics[key], unit)));
+    const value = b.metrics[key];
+    const cell = element(doc, 'td', finite(value) ? '' : 'metric-na', formatMetric(value, unit, b.undefinedMetrics?.[key] ?? ''));
+    row.append(element(doc, 'th', '', label), cell);
     tbody.append(row);
   }
   table.append(tbody);
+  if (b.periodNote) section.append(element(doc, 'div', 'backtest-note', b.periodNote));
   section.append(
     table,
     element(

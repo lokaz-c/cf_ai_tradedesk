@@ -173,7 +173,7 @@ describe('backtest results', () => {
       ['Average loss', '-655.10'],
       ['Trades', '12'],
       ['Final equity', '96,788.30'],
-      ['Profit factor', 'not finite'],
+      ['Profit factor', 'n/a'],
       ['Max consecutive wins', '2'],
       ['Max consecutive losses', '4'],
     ]);
@@ -195,6 +195,54 @@ describe('backtest results', () => {
     );
   });
 
+  it("shows quant's null metrics as n/a with the reason", () => {
+    const panel = buildGroundingPanel(document, {
+      backtests: [
+        {
+          ...BACKTEST,
+          metrics: { ...BACKTEST.metrics, avg_loss: null, profit_factor: null },
+          undefinedMetrics: { avg_loss: 'no losing trades', profit_factor: 'no losing trades' },
+          periodNote: "The period was filled in from quant's data range (2015-01-02 to 2026-10-02) and cut to quant's limit of 1827 days per backtest.",
+        },
+      ],
+    });
+    const cells = Object.fromEntries(
+      [...panel.querySelectorAll('.backtest-table tr')].map((tr) => [tr.querySelector('th').textContent, tr.querySelector('td')]),
+    );
+    expect(cells['Average loss'].textContent).toBe('n/a (no losing trades)');
+    expect(cells['Profit factor'].textContent).toBe('n/a (no losing trades)');
+    expect(cells['Profit factor'].className).toBe('metric-na');
+    expect(cells['Total return'].className).toBe('');
+    expect([...panel.querySelectorAll('.backtest-note')].map((n) => n.textContent)[0]).toBe(
+      "The period was filled in from quant's data range (2015-01-02 to 2026-10-02) and cut to quant's limit of 1827 days per backtest.",
+    );
+  });
+
+  it('keeps only text reasons for known metrics', () => {
+    const parsed = parseGrounding({
+      backtests: [{ ...BACKTEST, undefinedMetrics: { profit_factor: 'no closed trades', sharpe_ratio: 3, bogus: 'x' } }],
+    });
+    expect(parsed.backtests[0].undefinedMetrics).toEqual({ profit_factor: 'no closed trades' });
+    expect(parseGrounding({ backtests: [BACKTEST] }).backtests[0]).toMatchObject({ undefinedMetrics: {}, periodNote: '' });
+  });
+
+  it('marks a market-data rate limit as busy, with its retry advice', () => {
+    const panel = buildGroundingPanel(document, {
+      data: [
+        {
+          tool: 'get_levels',
+          service: 'market-data',
+          ticker: 'S001',
+          status: 'rate_limited',
+          detail: 'market-data is busy (rate limit reached); retry in 12 s.',
+        },
+      ],
+    });
+    expect(panel.querySelector('.grounding-source').textContent).toBe(
+      'S001BUSYmarket-data is busy (rate limit reached); retry in 12 s.',
+    );
+  });
+
   it('drops metrics that are not numbers', () => {
     const parsed = parseGrounding({ backtests: [{ ...BACKTEST, metrics: { total_return: '12', cagr: 5 } }] });
     expect(parsed.backtests[0].metrics.total_return).toBeNull();
@@ -203,7 +251,7 @@ describe('backtest results', () => {
 
   it('formats each unit', () => {
     expect([formatMetric(1.005, 'percent'), formatMetric(1234.5, 'currency'), formatMetric(2.4, 'count'), formatMetric(0.123, 'ratio'), formatMetric(null, 'ratio')]).toEqual(
-      ['1.00%', '1,234.50', '2', '0.12', 'not finite'],
+      ['1.00%', '1,234.50', '2', '0.12', 'n/a'],
     );
   });
 

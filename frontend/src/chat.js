@@ -25,7 +25,9 @@ export function streamReplyInto(el, body, onUpdate = () => {}, onMeta = () => {}
 
 /**
  * The message to show for a failed API response: the `detail` of an RFC 9457
- * problem body when there is one, otherwise a generic line with the status.
+ * problem body when there is one; for a 429 or 503 without one, the wait from
+ * Retry-After (whole seconds, as the Worker sends it); otherwise a generic
+ * line with the status.
  */
 export async function errorMessage(res) {
   try {
@@ -33,6 +35,10 @@ export async function errorMessage(res) {
     if (body && typeof body.detail === 'string' && body.detail) return body.detail;
   } catch {
     // Not JSON; fall through.
+  }
+  const retryAfter = (res.headers.get('Retry-After') ?? '').trim();
+  if ((res.status === 429 || res.status === 503) && /^\d+$/.test(retryAfter)) {
+    return `Busy, retry in ${Number(retryAfter)} s.`;
   }
   return `Request failed (HTTP ${res.status}).`;
 }
