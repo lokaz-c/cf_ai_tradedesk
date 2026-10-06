@@ -51,6 +51,8 @@ export interface Env extends LimitVars, ToolVars {
   TRADE_SESSION: DurableObjectNamespace;
   /** Per-IP limit on chat requests ([[ratelimits]] in wrangler.toml). */
   CHAT_RATE_LIMITER: RateLimit;
+  /** Per-IP limit on backtests, tighter than chat's. */
+  BACKTEST_RATE_LIMITER: RateLimit;
 }
 
 const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
@@ -91,13 +93,12 @@ Rules for numbers:
 - State a price, level, high, low, pivot or close only if it appears in a [MARKET DATA] block or a tool result in this conversation. Quote it as given; you may round it to two decimals. Never use prices from memory.
 - If you have no data for what the user asks, write "no data" instead of a number.
 - If a block is marked SYNTHETIC DEMO DATA, say once that the levels come from synthetic demo data and are not real market prices. Never describe them as current or real prices.
-- If a block says market data is unavailable, or has no data for a ticker, say so plainly and do not guess.`;
+- If a block says market data is unavailable, or has no data for a ticker, say so plainly and do not guess.
+- For a backtest, report only the numbers in the [BACKTEST] block, and say that quant's data is synthetic when the block says so. If the block says the backtest was not run, say why and give no results.`;
 
 /** Added to the system prompt when no market data service is configured. */
 const NO_DATA_SOURCE = `No market data source is connected to this deployment, so you have no price data for any instrument. Do not state price levels; explain the concepts and write "no data" where a level would go.`;
 
-/** Added to the system prompt of the tool rounds. */
-const TOOL_GUIDANCE = `You have tools that fetch market data. Before stating any level for a ticker, call get_levels; for recent price action, call get_recent_bars. Use the session's ticker unless the user names another one. If the question needs no market data, answer without calling a tool.`;
 
 /**
  * Logs answers with price-like numbers that match no provided value. The
@@ -247,7 +248,8 @@ export class TradeSession {
         { role: "user", content: body.message }
       ];
 
-      const toolset = buildToolset(this.env);
+      // CF-Connecting-IP is forwarded by the router; it keys the per-IP backtest limit.
+      const toolset = buildToolset(this.env, request.headers.get("CF-Connecting-IP"));
       let outcomes: ToolOutcome[] = [];
       let finalSystem: string;
       if (toolset) {
@@ -257,7 +259,7 @@ export class TradeSession {
         outcomes = await runToolRounds(
           this.env.AI,
           MODEL,
-          [{ role: "system", content: `${SYSTEM_PROMPT}\n\n${TOOL_GUIDANCE}${sessionContext}` }, ...messages],
+          [{ role: "system", content: `${SYSTEM_PROMPT}\n\n${toolset.guidance}${sessionContext}` }, ...messages],
           toolset,
           readMaxToolRounds(this.env),
         );

@@ -156,3 +156,22 @@ export async function consumeDailyBudget(db: D1Database, budget: number, now: Da
     .first<{ chat_requests: number }>();
   return row !== null;
 }
+
+/**
+ * Counts one backtest against today's backtest budget, in the same row as the
+ * chat count (daily_usage.backtests, migration 0005). Returns false, without
+ * counting, once `budget` backtests have run today.
+ */
+export async function consumeDailyBacktest(db: D1Database, budget: number, now: Date): Promise<boolean> {
+  if (budget <= 0) return false;
+  const row = await db
+    .prepare(
+      `INSERT INTO daily_usage (day, chat_requests, backtests) VALUES (?1, 0, 1)
+       ON CONFLICT (day) DO UPDATE SET backtests = backtests + 1
+       WHERE backtests < ?2
+       RETURNING backtests`,
+    )
+    .bind(utcDay(now), budget)
+    .first<{ backtests: number }>();
+  return row !== null;
+}
