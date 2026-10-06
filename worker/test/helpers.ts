@@ -134,14 +134,18 @@ export async function setSessionVars(sessionId: string, vars: Record<string, unk
   });
 }
 
-/** Points one session at the stubbed market-data, with a short timeout. */
+/**
+ * Points one session at the stubbed market-data, with a short timeout. The tool-loop tests model
+ * two rounds, so they pin MAX_TOOL_ROUNDS to 2; the production default of 1 is covered by
+ * tools.test.ts and the "honours a lower MAX_TOOL_ROUNDS" case.
+ */
 export function enableMarketData(sessionId: string, vars: Record<string, unknown> = {}) {
-  return setSessionVars(sessionId, { MARKET_DATA_URL, MARKET_DATA_TIMEOUT_MS: 100, ...vars });
+  return setSessionVars(sessionId, { MARKET_DATA_URL, MARKET_DATA_TIMEOUT_MS: 100, MAX_TOOL_ROUNDS: 2, ...vars });
 }
 
-/** Points one session at the stubbed quant API, with a short timeout. */
+/** Points one session at the stubbed quant API, with a short timeout and two tool rounds (see enableMarketData). */
 export function enableQuant(sessionId: string, vars: Record<string, unknown> = {}) {
-  return setSessionVars(sessionId, { QUANT_API_URL: QUANT_URL, QUANT_TIMEOUT_MS: 100, ...vars });
+  return setSessionVars(sessionId, { QUANT_API_URL: QUANT_URL, QUANT_TIMEOUT_MS: 100, MAX_TOOL_ROUNDS: 2, ...vars });
 }
 
 /** Splits a response body into its SSE data payloads (JSON parsed, [DONE] kept as a string). */
