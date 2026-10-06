@@ -1,4 +1,5 @@
 import { runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import {
   MODEL,
@@ -42,7 +43,7 @@ beforeEach(clearD1);
 
 describe("message window", () => {
   it.each([0, 1, 19, 20, 21, 30])(
-    "with %i stored messages, sends the last min(n, 20) and then the new message",
+    "with %i stored messages, sends the last min(n, 20), starting at a user turn, then the new message",
     async (n) => {
       const id = `window-${n}`;
       const stored = history(n);
@@ -54,10 +55,17 @@ describe("message window", () => {
       const { model, messages, stream, max_tokens } = aiInputs(ai);
       expect(model).toBe(MODEL);
       expect(stream).toBe(true);
-      expect(max_tokens).toBe(1024);
+      // MAX_OUTPUT_TOKENS in wrangler.toml.
+      expect(max_tokens).toBe(512);
+      expect(env.MAX_OUTPUT_TOKENS).toBe(512);
       expect(messages[0].role).toBe("system");
-      expect(messages.slice(1, -1)).toEqual(stored.slice(-MESSAGE_WINDOW));
-      expect(messages).toHaveLength(1 + Math.min(n, MESSAGE_WINDOW) + 1);
+      // Stored messages come in question/answer pairs. If the window starts
+      // with an answer (only possible with an odd count, as with 21 here),
+      // that answer is dropped so the model never sees it without its question.
+      const window = stored.slice(-MESSAGE_WINDOW);
+      const expected = window[0]?.role === "assistant" ? window.slice(1) : window;
+      expect(messages.slice(1, -1)).toEqual(expected);
+      expect(messages).toHaveLength(1 + expected.length + 1);
       expect(messages.at(-1)).toEqual({ role: "user", content: "new question" });
     },
   );

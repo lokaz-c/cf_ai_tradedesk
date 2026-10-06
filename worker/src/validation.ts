@@ -19,6 +19,9 @@ export type Timeframe = (typeof TIMEFRAMES)[number];
 /** Session IDs: the front end sends a UUID; allow URL-safe IDs up to 64 characters. */
 export const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
 
+export const INVALID_TICKER =
+  "Invalid ticker: use 1-10 letters or digits, optionally followed by '/', '.' or '-' and 1-10 more (for example GBP/USD or NQ).";
+
 /** Returns the upper-cased ticker, or null if it is not a valid ticker. */
 export function parseTicker(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -48,7 +51,10 @@ export function isSessionId(value: unknown): value is string {
   return typeof value === "string" && SESSION_ID_PATTERN.test(value);
 }
 
-export type Parsed<T> = { ok: true; value: T } | { ok: false; detail: string };
+/** A validated value, or the status (400, or 413 for oversized input) and reason. */
+export type Parsed<T> = { ok: true; value: T } | { ok: false; status: 400 | 413; detail: string };
+
+const invalid = (detail: string) => ({ ok: false, status: 400, detail }) as const;
 
 export interface InitBody {
   ticker: string;
@@ -58,20 +64,14 @@ export interface InitBody {
 
 /** Validates the body of `POST /api/session/:id/init`. */
 export function parseInitBody(body: Record<string, unknown> | null): Parsed<InitBody> {
-  if (!body) return { ok: false, detail: "Expected a JSON object body." };
+  if (!body) return invalid("Expected a JSON object body.");
   const ticker = parseTicker(body.ticker);
-  if (!ticker) {
-    return {
-      ok: false,
-      detail:
-        "Invalid ticker: use 1-10 letters or digits, optionally followed by '/', '.' or '-' and 1-10 more (for example GBP/USD or NQ).",
-    };
-  }
+  if (!ticker) return invalid(INVALID_TICKER);
   if (!isTimeframe(body.timeframe)) {
-    return { ok: false, detail: `Invalid timeframe: use one of ${TIMEFRAMES.join(", ")}.` };
+    return invalid(`Invalid timeframe: use one of ${TIMEFRAMES.join(", ")}.`);
   }
   if (!isSessionId(body.sessionId)) {
-    return { ok: false, detail: "Invalid sessionId: use 1-64 letters, digits, '-' or '_'." };
+    return invalid("Invalid sessionId: use 1-64 letters, digits, '-' or '_'.");
   }
   return { ok: true, value: { ticker, timeframe: body.timeframe, sessionId: body.sessionId } };
 }
@@ -80,12 +80,21 @@ export interface ChatBody {
   message: string;
 }
 
-/** Validates the body of `POST /api/session/:id/chat`. */
-export function parseChatBody(body: Record<string, unknown> | null): Parsed<ChatBody> {
-  if (!body) return { ok: false, detail: "Expected a JSON object body." };
+/**
+ * Validates the body of `POST /api/session/:id/chat`. A message longer than
+ * `maxChars` (JavaScript string length) is refused with 413.
+ */
+export function parseChatBody(
+  body: Record<string, unknown> | null,
+  maxChars: number,
+): Parsed<ChatBody> {
+  if (!body) return invalid("Expected a JSON object body.");
   const { message } = body;
   if (typeof message !== "string" || message.trim() === "") {
-    return { ok: false, detail: "Expected a non-empty string field 'message'." };
+    return invalid("Expected a non-empty string field 'message'.");
+  }
+  if (message.length > maxChars) {
+    return { ok: false, status: 413, detail: `Messages are limited to ${maxChars} characters.` };
   }
   return { ok: true, value: { message } };
 }

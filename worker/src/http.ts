@@ -17,15 +17,49 @@ export function problem(
 export const badRequest = (detail: string) => problem(400, "Bad Request", detail);
 export const notFound = (detail = "No route matches this method and path.") =>
   problem(404, "Not Found", detail);
+export const contentTooLarge = (detail: string) => problem(413, "Content Too Large", detail);
+
+/** Thrown by readJsonObject when the body is longer than its byte limit. */
+export class BodyTooLargeError extends Error {}
+
+/** Default byte limit for JSON request bodies. */
+export const MAX_JSON_BODY_BYTES = 16 * 1024;
+
+/** Reads a request body as UTF-8 text, giving up once it exceeds `maxBytes`. */
+async function readText(request: Request, maxBytes: number): Promise<string> {
+  const declared = Number(request.headers.get("Content-Length"));
+  if (declared > maxBytes) throw new BodyTooLargeError();
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let size = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel();
+      throw new BodyTooLargeError();
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+  return text + decoder.decode();
+}
 
 /**
  * Parses a JSON request body that must be an object. Returns null for an
- * empty body, invalid JSON, or any other JSON value.
+ * empty body, invalid JSON, or any other JSON value; throws BodyTooLargeError
+ * if the body is longer than `maxBytes`.
  */
-export async function readJsonObject(request: Request): Promise<Record<string, unknown> | null> {
+export async function readJsonObject(
+  request: Request,
+  maxBytes = MAX_JSON_BODY_BYTES,
+): Promise<Record<string, unknown> | null> {
+  const text = await readText(request, maxBytes);
   let value: unknown;
   try {
-    value = await request.json();
+    value = JSON.parse(text);
   } catch {
     return null;
   }

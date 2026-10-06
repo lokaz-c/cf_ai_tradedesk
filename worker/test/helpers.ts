@@ -32,13 +32,21 @@ export async function expectProblem(res: Response, status: number, title: string
 /** The origin the tests send by default; it is in ALLOWED_ORIGINS in wrangler.toml. */
 export const ORIGIN = "https://cf-ai-tradedesk.pages.dev";
 
+let nextIp = 0;
+
 /**
  * Sends a request through the Worker's default export (the real router), as
- * the deployed page would: with an allowed Origin unless the caller sets one.
+ * the deployed page would: with an allowed Origin and a CF-Connecting-IP.
+ * Each request gets its own address from 10.0.0.0/8 unless the caller sets
+ * one, so the per-IP rate limit only applies in tests that ask for it.
  */
 export function api(path: string, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Origin")) headers.set("Origin", ORIGIN);
+  if (!headers.has("CF-Connecting-IP")) {
+    nextIp++;
+    headers.set("CF-Connecting-IP", `10.${(nextIp >> 16) & 255}.${(nextIp >> 8) & 255}.${nextIp & 255}`);
+  }
   return rawApi(path, { ...init, headers });
 }
 
@@ -47,10 +55,10 @@ export function rawApi(path: string, init?: RequestInit): Promise<Response> {
   return exports.default.fetch(new Request(`https://tradedesk.test${path}`, init));
 }
 
-export function postJson(path: string, body: unknown): Promise<Response> {
+export function postJson(path: string, body: unknown, headers?: HeadersInit): Promise<Response> {
   return api(path, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...Object.fromEntries(new Headers(headers)) },
     body: JSON.stringify(body),
   });
 }
