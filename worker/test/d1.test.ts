@@ -112,6 +112,7 @@ describe("GET /api/history/:ticker", () => {
       timeframe: "1H",
       user_query: "question 25",
       ai_response: "answer 25",
+      grounding: null,
       created_at: 2500,
     });
   });

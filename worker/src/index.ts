@@ -24,6 +24,17 @@ import {
   type LimitVars,
 } from "./limits";
 import { CONTEXT_SQL, HISTORY_SQL, TICKERS_SQL } from "./queries";
+import { streamWithTrailer } from "./stream";
+import {
+  buildToolset,
+  dataBlock,
+  groundAnswer,
+  readMaxToolRounds,
+  runToolRounds,
+  type GroundingMeta,
+  type ToolOutcome,
+  type ToolVars,
+} from "./tools";
 import {
   INVALID_TICKER,
   isSessionId,
@@ -32,7 +43,7 @@ import {
   parseTickerPath,
 } from "./validation";
 
-export interface Env extends LimitVars {
+export interface Env extends LimitVars, ToolVars {
   /** Comma-separated browser origins allowed to call the API. */
   ALLOWED_ORIGINS?: string;
   AI: Ai;
@@ -75,7 +86,35 @@ Your responses are structured, precise, and actionable. When analyzing a market:
 
 Keep responses concise and trader-focused. Use terminology professionals use.
 Never give financial advice — frame everything as analysis and education.
-When you don't have real-time price data, say so and analyze based on the user's description.`;
+
+Rules for numbers:
+- State a price, level, high, low, pivot or close only if it appears in a [MARKET DATA] block or a tool result in this conversation. Quote it as given; you may round it to two decimals. Never use prices from memory.
+- If you have no data for what the user asks, write "no data" instead of a number.
+- If a block is marked SYNTHETIC DEMO DATA, say once that the levels come from synthetic demo data and are not real market prices. Never describe them as current or real prices.
+- If a block says market data is unavailable, or has no data for a ticker, say so plainly and do not guess.`;
+
+/** Added to the system prompt when no market data service is configured. */
+const NO_DATA_SOURCE = `No market data source is connected to this deployment, so you have no price data for any instrument. Do not state price levels; explain the concepts and write "no data" where a level would go.`;
+
+/** Added to the system prompt of the tool rounds. */
+const TOOL_GUIDANCE = `You have tools that fetch market data. Before stating any level for a ticker, call get_levels; for recent price action, call get_recent_bars. Use the session's ticker unless the user names another one. If the question needs no market data, answer without calling a tool.`;
+
+/**
+ * Logs answers with price-like numbers that match no provided value. The
+ * count is also stored with the analysis (analyses.grounding).
+ */
+function logUnverified(session: SessionState, meta: GroundingMeta): void {
+  if (meta.unverified.length === 0) return;
+  console.warn(
+    JSON.stringify({
+      event: "unverified_numbers",
+      sessionId: session.sessionId,
+      ticker: session.ticker,
+      count: meta.unverified.length,
+      values: meta.unverified.map((u) => u.text),
+    }),
+  );
+}
 
 // ─── Durable Object ────────────────────────────────────────────────────────────
 
@@ -199,7 +238,7 @@ export class TradeSession {
         }
       }
 
-      const systemWithContext = SYSTEM_PROMPT +
+      const sessionContext =
         (session.ticker ? `\n\nCurrent session context: Analyzing ${session.ticker} on the ${session.timeframe} timeframe.` : "") +
         ragContext;
 
@@ -208,22 +247,46 @@ export class TradeSession {
         { role: "user", content: body.message }
       ];
 
+      const toolset = buildToolset(this.env);
+      let outcomes: ToolOutcome[] = [];
+      let finalSystem: string;
+      if (toolset) {
+        // Non-streamed tool rounds first: the model picks what to fetch and the
+        // Worker fetches it. The streamed answer is then written from a data
+        // block built from the results, with no tools offered.
+        outcomes = await runToolRounds(
+          this.env.AI,
+          MODEL,
+          [{ role: "system", content: `${SYSTEM_PROMPT}\n\n${TOOL_GUIDANCE}${sessionContext}` }, ...messages],
+          toolset,
+          readMaxToolRounds(this.env),
+        );
+        finalSystem = `${SYSTEM_PROMPT}${sessionContext}\n\n${dataBlock(outcomes)}`;
+      } else {
+        finalSystem = `${SYSTEM_PROMPT}\n\n${NO_DATA_SOURCE}${sessionContext}`;
+      }
+
       // Stream response from Workers AI
       const aiResponse = await this.env.AI.run(MODEL, {
         messages: [
-          { role: "system", content: systemWithContext },
+          { role: "system", content: finalSystem },
           ...messages
         ],
         stream: true,
         max_tokens: limits.maxOutputTokens,
       }) as ReadableStream;
 
-      // Collect full response for storage (tee the stream)
+      // One copy goes to the client; the other is read in the background and saved.
       const [stream1, stream2] = aiResponse.tee();
 
-      // Background: collect response and save to D1
+      // Background: collect the reply, run the post-check, and save both.
       this.state.waitUntil((async () => {
-        const fullResponse = await collectStreamedText(stream2);
+        const reply = await collectStreamedText(stream2);
+        const { notes, meta } = groundAnswer(reply, outcomes, body.message);
+        // With a data service configured, the client receives the data notes
+        // as part of the answer, so the saved copy includes them too.
+        const fullResponse = toolset ? reply + notes : reply;
+        logUnverified(session, meta);
 
         // Update session messages
         session.messages.push({ role: "user", content: body.message });
@@ -234,13 +297,18 @@ export class TradeSession {
         if (session.ticker) {
           const analysisId = crypto.randomUUID();
           await this.env.DB.prepare(
-            `INSERT INTO analyses (id, session_id, ticker, timeframe, user_query, ai_response)
-             VALUES (?, ?, ?, ?, ?, ?)`
-          ).bind(analysisId, session.sessionId, session.ticker, session.timeframe, body.message, fullResponse).run();
+            `INSERT INTO analyses (id, session_id, ticker, timeframe, user_query, ai_response, grounding)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          ).bind(analysisId, session.sessionId, session.ticker, session.timeframe, body.message, fullResponse, JSON.stringify(meta)).run();
         }
       })());
 
-      return new Response(stream1, {
+      // Without a data service the model's stream goes out unchanged. With
+      // one, the Worker re-emits it and adds the data notes and the report.
+      const clientStream = toolset
+        ? streamWithTrailer(stream1, (reply) => groundAnswer(reply, outcomes, body.message))
+        : stream1;
+      return new Response(clientStream, {
         headers: {
           "Content-Type": "text/event-stream",
           "Cache-Control": "no-cache",
