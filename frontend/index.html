@@ -576,6 +576,51 @@
     .bias-tag.bearish { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
     .bias-tag.neutral { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,179,0,0.3); }
 
+    /* Grounding report under an answer */
+    .grounding {
+      margin-top: 6px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--bg-card);
+      font-size: 11px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .grounding-source { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .grounding-ticker { color: var(--accent); font-weight: 700; letter-spacing: 0.05em; }
+    .grounding-detail { color: var(--text-secondary); }
+
+    .grounding-badge {
+      padding: 1px 6px;
+      border-radius: 3px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+    }
+
+    .grounding-source.synthetic .grounding-badge { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(255,179,0,0.3); }
+    .grounding-source.real .grounding-badge { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,230,118,0.3); }
+    .grounding-source.error .grounding-badge { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,61,87,0.3); }
+
+    .grounding-label {
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin-bottom: 2px;
+    }
+
+    .grounding-list { list-style: none; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+    .grounding-cited { display: flex; gap: 6px; }
+    .cited-label { color: var(--text-secondary); }
+    .cited-value { color: var(--text-primary); font-weight: 700; }
+    .cited-ticker { color: var(--text-muted); }
+    .grounding-section.warn .grounding-label { color: var(--red); }
+    .grounding-unverified { color: var(--red); }
+
     /* Typing indicator */
     .typing-indicator {
       display: flex;

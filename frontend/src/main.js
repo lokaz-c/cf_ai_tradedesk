@@ -1,6 +1,7 @@
 import { errorMessage, streamReplyInto } from './chat.js';
 import {
   buildAnalysisItem,
+  buildGroundingPanel,
   buildMessage,
   buildNotice,
   buildTickerHeader,
@@ -101,8 +102,12 @@ async function sendMessage(text) {
       return;
     }
 
-    const reply = await streamReplyInto(assistantMsgEl, res.body, scrollToEnd);
+    let report = null;
+    const reply = await streamReplyInto(assistantMsgEl, res.body, scrollToEnd, (meta) => {
+      report = meta;
+    });
     if (!reply) showError(assistantMsgEl, 'The model returned an empty reply.');
+    else showGrounding(assistantMsgEl, report);
   } catch {
     showError(assistantMsgEl, 'The reply stream was interrupted.');
   } finally {
@@ -110,6 +115,12 @@ async function sendMessage(text) {
     sendBtn.disabled = false;
     scrollToEnd();
   }
+}
+
+/** Shows the grounding report (data sources, levels cited, unverified numbers) under an answer. */
+function showGrounding(contentEl, report) {
+  const panel = buildGroundingPanel(document, report);
+  if (panel) contentEl.after(panel);
 }
 
 function addMessage(role, content, streaming = false) {
@@ -159,6 +170,7 @@ async function loadHistory() {
                 addMessage('user', item.user_query);
                 const el = addMessage('assistant', '');
                 setMarkdown(el, item.ai_response);
+                showGrounding(el, item.grounding);
               };
               analyses.appendChild(a);
             }

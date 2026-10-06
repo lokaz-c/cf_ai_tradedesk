@@ -1,5 +1,7 @@
+import { runInDurableObject } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { expect, vi } from "vitest";
+import { MARKET_DATA_URL } from "./fixtures";
 
 export const MODEL = "@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -106,11 +108,57 @@ export function mockAiStream(tokens: string[], chunkSize?: number) {
   }) as never);
 }
 
+/**
+ * Fake Workers AI for chats with tools. Non-streamed calls (the tool rounds)
+ * return `rounds` in order, then a reply with no tool calls; streamed calls
+ * (the final answer) return `tokens` as a Workers AI SSE stream.
+ */
+export function mockAiTools(rounds: unknown[], tokens: string[]) {
+  let next = 0;
+  return vi.spyOn(env.AI, "run").mockImplementation((async (_model: string, inputs: { stream?: boolean }) => {
+    if (inputs.stream) return streamOf(sseBody(tokens).split(/(?<=\n\n)/).map((e) => new TextEncoder().encode(e)));
+    return rounds[next++] ?? { response: "" };
+  }) as never);
+}
+
+/** A non-streamed response asking for tool calls. */
+export function toolCalls(...calls: [name: string, args: Record<string, unknown>][]) {
+  return { response: null, tool_calls: calls.map(([name, args]) => ({ name, arguments: args })) };
+}
+
+/** Overrides vars for one session's Durable Object instance. */
+export async function setSessionVars(sessionId: string, vars: Record<string, unknown>) {
+  await runInDurableObject(sessionStub(sessionId), (instance) => {
+    const object = instance as unknown as { env: Record<string, unknown> };
+    object.env = { ...object.env, ...vars };
+  });
+}
+
+/** Points one session at the stubbed market-data, with a short timeout. */
+export function enableMarketData(sessionId: string, vars: Record<string, unknown> = {}) {
+  return setSessionVars(sessionId, { MARKET_DATA_URL, MARKET_DATA_TIMEOUT_MS: 100, ...vars });
+}
+
+/** Splits a response body into its SSE data payloads (JSON parsed, [DONE] kept as a string). */
+export function sseEvents(body: string): unknown[] {
+  return body
+    .split("\n\n")
+    .filter((e) => e.startsWith("data: "))
+    .map((e) => (e === "data: [DONE]" ? "[DONE]" : JSON.parse(e.slice(6))));
+}
+
+/** The reply text in a response body, as the page would show it. */
+export function replyText(body: string): string {
+  return sseEvents(body)
+    .map((e) => (typeof e === "object" && e !== null && "response" in e ? String((e as { response: string }).response) : ""))
+    .join("");
+}
+
 /** The `inputs` argument of the n-th env.AI.run call. */
 export function aiInputs(spy: ReturnType<typeof mockAiStream>, call = 0) {
   const [model, inputs] = spy.mock.calls[call] as unknown as [
     string,
-    { messages: StoredMessage[]; stream: boolean; max_tokens: number },
+    { messages: StoredMessage[]; stream: boolean; max_tokens: number; tools?: { name: string }[] },
   ];
   return { model, ...inputs };
 }

@@ -7,15 +7,20 @@ import { setMarkdown } from './render.js';
  * Reads a chat reply stream (Workers AI server-sent events) and re-renders the
  * reply into `el` after every network read. The parser is the one the Worker
  * uses to store the reply, so a token split across two reads is still shown.
- * Resolves with the full reply text.
+ * A grounding report at the end of the stream goes to `onMeta`. Resolves with
+ * the full reply text.
  */
-export function streamReplyInto(el, body, onUpdate = () => {}) {
+export function streamReplyInto(el, body, onUpdate = () => {}, onMeta = () => {}) {
   let text = '';
-  return readStreamedText(body, (piece) => {
-    text += piece;
-    setMarkdown(el, text);
-    onUpdate(text);
-  });
+  return readStreamedText(
+    body,
+    (piece) => {
+      text += piece;
+      setMarkdown(el, text);
+      onUpdate(text);
+    },
+    onMeta,
+  );
 }
 
 /**

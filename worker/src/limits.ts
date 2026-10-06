@@ -38,7 +38,7 @@ export const DEFAULT_LIMITS = {
 export const MESSAGE_WINDOW = 20;
 
 /** Wrangler passes numeric vars as numbers and quoted ones as strings; accept both. */
-function intVar(value: unknown, fallback: number, min: number, max: number): number {
+export function intVar(value: unknown, fallback: number, min: number, max: number): number {
   const n =
     typeof value === "number" ? value : typeof value === "string" && value.trim() !== "" ? Number(value) : NaN;
   return Number.isInteger(n) && n >= min && n <= max ? n : fallback;
